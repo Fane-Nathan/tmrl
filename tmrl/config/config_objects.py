@@ -243,7 +243,7 @@ if getattr(cfg, "PRAGMA_RL2", False):
             "or the image interface (PRAGMA_LIDAR=False)."
         INT = partial(
             TM2020InterfaceLidarRL2,
-            img_hist_len=cfg.IMG_HIST_LEN,
+            img_hist_len=1,
             gamepad=cfg.PRAGMA_GAMEPAD,
         )
         SAMPLE_COMPRESSOR = get_local_buffer_sample_lidar_progress_rl2
@@ -251,7 +251,7 @@ if getattr(cfg, "PRAGMA_RL2", False):
     else:
         INT = partial(
             TM2020InterfaceRL2,
-            img_hist_len=cfg.IMG_HIST_LEN,
+            img_hist_len=1,
             gamepad=cfg.PRAGMA_GAMEPAD,
             grayscale=cfg.GRAYSCALE,
             resize_to=(cfg.IMG_WIDTH, cfg.IMG_HEIGHT),
@@ -268,7 +268,7 @@ if getattr(cfg, "PRAGMA_RL2", False):
     CONFIG_DICT["interface"] = INT
     for k, v in CONFIG_DICT_MODIFIERS.items():
         CONFIG_DICT[k] = v
-    CONFIG_DICT["act_buf_len"] = 0
+    CONFIG_DICT["act_buf_len"] = cfg.ACT_BUF_LEN
     CONFIG_DICT["act_in_obs"] = False
 
     # Memory: SequenceMemory (no imgs_obs / act_buf_len args).
