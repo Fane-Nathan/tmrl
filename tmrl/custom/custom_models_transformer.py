@@ -211,28 +211,20 @@ class TransformerActorHead(TorchActorModule):
     def act(self, obs, test: bool = False):
         """Inference. obs is the unaugmented env obs (tuple or array).
 
-        The env wrapper is responsible for appending (a_prev, r_prev, d_prev) into the
-        actor's history via push_transition() *before* calling act(). On the very first
-        call after reset (no prior step), the history is empty and we treat d_prev=1.
+        The env wrapper is responsible for appending (obs, a_prev, r_prev, d_prev) into
+        the actor's history via push_transition() *before* calling act(). On the very
+        first call after reset (no prior step), the history is empty and we treat
+        d_prev=1.
         """
         device = next(self.parameters()).device
-        if self.tuple_obs:
-            parts = []
-            for o in obs:
-                t = torch.as_tensor(o, device=device, dtype=torch.float32).reshape(-1)
-                parts.append(t)
-            obs_flat = torch.cat(parts, dim=-1)
-        else:
-            obs_flat = torch.as_tensor(obs, device=device, dtype=torch.float32).reshape(-1)
-        # Append the *current* obs with the most recent (a, r, d) already in history;
-        # but our convention is the caller pushes (obs, a_prev, r_prev, d_prev) BEFORE
-        # act(). So we expect the most recent entry to be this obs. To keep act() simple
-        # and stateful, we'll push here if the caller forgot — see push_transition for the
-        # canonical path.
-        # We assume the caller has already pushed. Run forward over the deque:
+        # History tensors are already flat [1, T, *]; bypass flatten_obs_seq.
         obs_t, a_t, r_t, d_t = self._history_to_seq(device)
-        a, _ = self.forward(obs_t, a_t, r_t, d_t,
-                            test=test, with_logprob=False, detach_trunk=False)
+        x = self.embedder(obs_t, a_t, r_t, d_t)
+        hidden = self.trunk(x)
+        mu = self.mu_layer(hidden[:, -1])
+        log_std = self.log_std_layer(hidden[:, -1])
+        a, _ = _squashed_gaussian_sample(mu, log_std, self.act_limit,
+                                         test=test, with_logprob=False)
         return a.squeeze(0).cpu().numpy()
 
     def push_transition(self, obs, a_prev, r_prev: float, d_prev: float):
