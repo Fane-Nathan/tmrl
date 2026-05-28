@@ -51,10 +51,11 @@ def dump_run_instance_images_dataset(run_instance, checkpoint_path):
     dump(run_instance, checkpoint_path)
 
 
-def update_memory(run_instance):
-    steps = cfg.TMRL_CONFIG["TRAINING_STEPS_PER_ROUND"]
-    memory_size = cfg.TMRL_CONFIG["MEMORY_SIZE"]
-    batch_size = cfg.TMRL_CONFIG["BATCH_SIZE"]
+def update_memory(run_instance, training_cls=None):
+    training_keywords = getattr(training_cls, "keywords", {}) or {}
+    steps = training_keywords.get("steps", cfg.TMRL_CONFIG["TRAINING_STEPS_PER_ROUND"])
+    memory_size = training_keywords.get("memory_size", cfg.TMRL_CONFIG["MEMORY_SIZE"])
+    batch_size = training_keywords.get("batch_size", cfg.TMRL_CONFIG["BATCH_SIZE"])
     if run_instance.steps != steps \
             or run_instance.memory.batch_size != batch_size \
             or run_instance.memory.memory_size != memory_size:
@@ -81,7 +82,7 @@ def update_run_instance(run_instance, training_cls):
     if "RESET_TRAINING" in cfg.TMRL_CONFIG and cfg.TMRL_CONFIG["RESET_TRAINING"]:
         new_run_instance = training_cls()
         new_run_instance.memory = run_instance.memory
-        new_run_instance = update_memory(new_run_instance)
+        new_run_instance = update_memory(new_run_instance, training_cls)
         new_run_instance.total_samples = len(new_run_instance.memory)
         return new_run_instance
 
@@ -159,13 +160,14 @@ def update_run_instance(run_instance, training_cls):
                 run_instance.agent.m = m
                 logging.info(f"M switched to {m} (old: {old}).")
 
-    epochs = cfg.TMRL_CONFIG["MAX_EPOCHS"]
-    rounds = cfg.TMRL_CONFIG["ROUNDS_PER_EPOCH"]
-    update_model_interval = cfg.TMRL_CONFIG["UPDATE_MODEL_INTERVAL"]
-    update_buffer_interval = cfg.TMRL_CONFIG["UPDATE_BUFFER_INTERVAL"]
-    max_training_steps_per_env_step = cfg.TMRL_CONFIG["MAX_TRAINING_STEPS_PER_ENVIRONMENT_STEP"]
-    profiling = cfg.PROFILE_TRAINER
-    start_training = cfg.TMRL_CONFIG["ENVIRONMENT_STEPS_BEFORE_TRAINING"]
+    training_keywords = getattr(training_cls, "keywords", {}) or {}
+    epochs = training_keywords.get("epochs", cfg.TMRL_CONFIG["MAX_EPOCHS"])
+    rounds = training_keywords.get("rounds", cfg.TMRL_CONFIG["ROUNDS_PER_EPOCH"])
+    update_model_interval = training_keywords.get("update_model_interval", cfg.TMRL_CONFIG["UPDATE_MODEL_INTERVAL"])
+    update_buffer_interval = training_keywords.get("update_buffer_interval", cfg.TMRL_CONFIG["UPDATE_BUFFER_INTERVAL"])
+    max_training_steps_per_env_step = training_keywords.get("max_training_steps_per_env_step", cfg.TMRL_CONFIG["MAX_TRAINING_STEPS_PER_ENVIRONMENT_STEP"])
+    profiling = training_keywords.get("profiling", cfg.PROFILE_TRAINER)
+    start_training = training_keywords.get("start_training", cfg.TMRL_CONFIG["ENVIRONMENT_STEPS_BEFORE_TRAINING"])
 
     if run_instance.epochs != epochs:
         old = run_instance.epochs
@@ -202,6 +204,6 @@ def update_run_instance(run_instance, training_cls):
         run_instance.start_training = start_training
         logging.info(f"Number of environment steps before training changed to {start_training} (old: {old}).")
 
-    run_instance = update_memory(run_instance)
+    run_instance = update_memory(run_instance, training_cls)
 
     return run_instance

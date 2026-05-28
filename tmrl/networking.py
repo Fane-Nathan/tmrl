@@ -233,6 +233,14 @@ def dump_run_instance(run_instance, checkpoint_path):
     dump(run_instance, checkpoint_path)
 
 
+def broadcast_run_instance_model(interface, run_instance):
+    agent = getattr(run_instance, "agent", None)
+    get_actor = getattr(agent, "get_actor", None)
+    if callable(get_actor):
+        logging.info(f" broadcasting current model...")
+        interface.broadcast_model(get_actor())
+
+
 def iterate_epochs(run_cls,
                    interface: TrainerInterface,
                    checkpoint_path: str,
@@ -265,6 +273,8 @@ def iterate_epochs(run_cls,
                 t1 = time.time()
                 run_instance = updater_fn(run_instance, run_cls)
                 logging.info(f"Checkpoint updated in {time.time() - t1} seconds.")
+
+        broadcast_run_instance_model(interface, run_instance)
 
         while run_instance.epoch < run_instance.epochs:
             # time.sleep(1)  # on network file systems writing files is asynchronous and we need to wait for sync
@@ -717,6 +727,9 @@ class RolloutWorker:
         """
 
         iterator = range(nb_episodes) if nb_episodes != np.inf else itertools.count()
+
+        if not expert and self.__endpoint is not None:
+            self.update_actor_weights(verbose=verbose, blocking=False)
 
         if expert:
             if not verbose:

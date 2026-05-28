@@ -1,5 +1,6 @@
 # standard library imports
 import itertools
+import inspect
 from copy import deepcopy
 from dataclasses import dataclass
 
@@ -46,7 +47,8 @@ class SpinupSacAgent(TrainingAgent):  # Adapted from Spinup
 
     def __post_init__(self):
         observation_space, action_space = self.observation_space, self.action_space
-        device = self.device or ("cuda" if torch.cuda.is_available() else "cpu")
+        self.device = self.device or ("cuda" if torch.cuda.is_available() else "cpu")
+        device = self.device
         model = self.model_cls(observation_space, action_space)
         logging.debug(f" device SAC: {device}")
         self.model = model.to(device)
@@ -67,7 +69,7 @@ class SpinupSacAgent(TrainingAgent):  # Adapted from Spinup
         else:
             pi_optimizer_cls = SGD
         pi_optimizer_kwargs = {"lr": self.lr_actor}
-        if self.optimizer_actor in ["adam, adamw"] and self.betas_actor is not None:
+        if self.optimizer_actor in ["adam", "adamw"] and self.betas_actor is not None:
             pi_optimizer_kwargs["betas"] = tuple(self.betas_actor)
         if self.l2_actor is not None:
             pi_optimizer_kwargs["weight_decay"] = self.l2_actor
@@ -79,7 +81,7 @@ class SpinupSacAgent(TrainingAgent):  # Adapted from Spinup
         else:
             q_optimizer_cls = SGD
         q_optimizer_kwargs = {"lr": self.lr_critic}
-        if self.optimizer_critic in ["adam, adamw"] and self.betas_critic is not None:
+        if self.optimizer_critic in ["adam", "adamw"] and self.betas_critic is not None:
             q_optimizer_kwargs["betas"] = tuple(self.betas_critic)
         if self.l2_critic is not None:
             q_optimizer_kwargs["weight_decay"] = self.l2_critic
@@ -317,11 +319,19 @@ class REDQSACAgent(TrainingAgent):
 
     def __post_init__(self):
         observation_space, action_space = self.observation_space, self.action_space
-        device = self.device or ("cuda" if torch.cuda.is_available() else "cpu")
-        model = self.model_cls(observation_space, action_space)
+        self.device = self.device or ("cuda" if torch.cuda.is_available() else "cpu")
+        device = self.device
+        model_kwargs = {}
+        if "n" in inspect.signature(self.model_cls).parameters:
+            model_kwargs["n"] = self.n
+        model = self.model_cls(observation_space, action_space, **model_kwargs)
         logging.debug(f" device REDQ-SAC: {device}")
         self.model = model.to(device)
         self.model_target = no_grad(deepcopy(self.model))
+        actual_n = len(self.model.qs)
+        if actual_n != self.n:
+            logging.warning(f"REDQ model has {actual_n} Q-networks but agent was configured with n={self.n}; using {actual_n}.")
+            self.n = actual_n
         self.pi_optimizer = Adam(self.model.actor.parameters(), lr=self.lr_actor)
         self.q_optimizer_list = [Adam(q.parameters(), lr=self.lr_critic) for q in self.model.qs]
         self.criterion = torch.nn.MSELoss()
@@ -355,11 +365,9 @@ class REDQSACAgent(TrainingAgent):
         # FIXME? log_prob = log_prob.reshape(-1, 1)
 
         loss_alpha = None
+        alpha_t = torch.exp(self.log_alpha.detach()) if self.learn_entropy_coef else self.alpha_t
         if self.learn_entropy_coef and update_policy:
-            alpha_t = torch.exp(self.log_alpha.detach())
             loss_alpha = -(self.log_alpha * (logp_pi + self.target_entropy).detach()).mean()
-        else:
-            alpha_t = self.alpha_t
 
         if loss_alpha is not None:
             self.alpha_optimizer.zero_grad()
@@ -419,7 +427,69 @@ class REDQSACAgent(TrainingAgent):
         )
 
         if self.learn_entropy_coef:
-            ret_dict["loss_entropy_coef"] = loss_alpha.detach().item()
+            if loss_alpha is not None:
+                ret_dict["loss_entropy_coef"] = loss_alpha.detach().item()
             ret_dict["entropy_coef"] = alpha_t.item()
 
         return ret_dict
+
+
+# Recurrent (Transformer-trunk) REDQ-SAC =================================================================================
+#
+# RL² variant. Skeleton — implementation lands in task #4.
+#
+# Differences vs REDQSACAgent:
+#   - batch is sequence-shaped: each element is a window of (burn_in + train_window) steps
+#   - obs at each step is (o_t, a_{t-1}, r_{t-1}, d_{t-1}) — supplied by the env wrapper
+#   - actor + REDQ critic heads share a causal Transformer trunk
+#   - Q-targets and Q-predictions are computed at every position in the train_window
+#   - loss is masked to the last train_window positions only (R2D2 burn-in via mask)
+#   - polyak update restricted to (trunk + critic heads), the actor head is not target-copied
+
+
+@dataclass(eq=0)
+class RecurrentREDQSACAgent(TrainingAgent):
+    observation_space: type
+    action_space: type
+    device: str = None
+    model_cls: type = None  # set to TransformerREDQActorCritic in config
+    gamma: float = 0.99
+    polyak: float = 0.995
+    alpha: float = 0.2
+    lr_actor: float = 3e-4
+    lr_critic: float = 3e-4
+    lr_entropy: float = 3e-4
+    learn_entropy_coef: bool = True
+    target_entropy: float = None
+    n: int = 10
+    m: int = 2
+    q_updates_per_policy_update: int = 20
+    burn_in: int = 20
+    train_window: int = 64
+    grad_clip: float = 10.0
+
+    model_nograd = cached_property(lambda self: no_grad(copy_shared(self.model)))
+
+    def __post_init__(self):
+        # Construct model, model_target (Q-side only target-copied), optimizers,
+        # alpha autotuning. Wiring identical in spirit to REDQSACAgent but with
+        # the transformer trunk and Q-only polyak.
+        raise NotImplementedError
+
+    def get_actor(self):
+        raise NotImplementedError
+
+    def train(self, batch):
+        # batch is a dict with sequence tensors (see SequenceMemory.sample()).
+        # Steps:
+        #   1. Build embedder input from (obs, a_prev, r_prev, d_prev) over the whole window.
+        #   2. trunk forward once -> hidden[B,T,d_model].
+        #   3. Actor head reads hidden at positions [burn_in:] -> pi, logp on train_window.
+        #   4. For Q-target: shift the window by +1, run trunk again (separate forward) to
+        #      get hidden_next; sample m of n target Q-heads, take min over m, build backup.
+        #   5. Q-loss = MSE between Q_i(hidden, act) and backup, averaged on train_window only.
+        #   6. Policy loss = (alpha * logp - mean_i Q_i(hidden, pi)).mean over train_window.
+        #   7. Alpha loss as usual, on train_window logp.
+        #   8. grad clip; optimizer steps.
+        #   9. polyak update on trunk + critic heads only.
+        raise NotImplementedError

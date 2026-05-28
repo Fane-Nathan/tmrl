@@ -147,7 +147,7 @@ def sac_v2_entropy_scheduler(agent, epoch):
     end_ent = -7.0
     end_epoch = 200
     if epoch <= end_epoch:
-        agent.entopy_target = start_ent + (end_ent - start_ent) * epoch / end_epoch
+        agent.target_entropy = start_ent + (end_ent - start_ent) * epoch / end_epoch
 
 
 ENV_CLS = partial(GenericGymEnv, id=cfg.RTGYM_VERSION, gym_kwargs={"config": CONFIG_DICT})

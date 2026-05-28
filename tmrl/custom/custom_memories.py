@@ -157,12 +157,40 @@ class GenericTorchMemory(TorchMemory):
         else:
             return res
 
-    def get_transition(self, item):
+    def is_valid_transition_index(self, item):
+        return not self.data[6][item]
 
-        # This is a hack to avoid invalid transitions from terminal to initial
-        # TODO: find a way to only index valid transitions instead
-        while self.data[6][item]:
-            item = random.randint(a=0, b=self.__len__() - 1)
+    def _fallback_valid_transition_index(self, item):
+        length = self.__len__()
+        for offset in range(1, length):
+            left = item - offset
+            if left >= 0 and self.is_valid_transition_index(left):
+                return left
+            right = item + offset
+            if right < length and self.is_valid_transition_index(right):
+                return right
+        raise RuntimeError("Replay memory has no valid non-terminal transitions to sample.")
+
+    def ensure_valid_transition_index(self, item):
+        if self.is_valid_transition_index(item):
+            return item
+        return self._fallback_valid_transition_index(item)
+
+    def sample_indices(self):
+        length = self.__len__()
+        if length <= 0:
+            raise RuntimeError("Cannot sample from an empty replay memory.")
+        for _ in range(self.batch_size):
+            for _ in range(100):
+                item = random.randint(a=0, b=length - 1)
+                if self.is_valid_transition_index(item):
+                    yield item
+                    break
+            else:
+                yield self._fallback_valid_transition_index(random.randint(a=0, b=length - 1))
+
+    def get_transition(self, item):
+        item = self.ensure_valid_transition_index(item)
 
         idx_last = item
         idx_now = item + 1
@@ -214,6 +242,38 @@ class MemoryTM(TorchMemory):
         else:
             return res
 
+    def is_valid_transition_index(self, item):
+        return not self.data[4][item + self.min_samples - 1]
+
+    def _fallback_valid_transition_index(self, item):
+        length = self.__len__()
+        for offset in range(1, length):
+            left = item - offset
+            if left >= 0 and self.is_valid_transition_index(left):
+                return left
+            right = item + offset
+            if right < length and self.is_valid_transition_index(right):
+                return right
+        raise RuntimeError("Replay memory has no valid non-terminal transitions to sample.")
+
+    def ensure_valid_transition_index(self, item):
+        if self.is_valid_transition_index(item):
+            return item
+        return self._fallback_valid_transition_index(item)
+
+    def sample_indices(self):
+        length = self.__len__()
+        if length <= 0:
+            raise RuntimeError("Cannot sample from an empty replay memory.")
+        for _ in range(self.batch_size):
+            for _ in range(100):
+                item = random.randint(a=0, b=length - 1)
+                if self.is_valid_transition_index(item):
+                    yield item
+                    break
+            else:
+                yield self._fallback_valid_transition_index(random.randint(a=0, b=length - 1))
+
     def get_transition(self, item):
         raise NotImplementedError
 
@@ -228,15 +288,7 @@ class MemoryTMLidar(MemoryTM):
         So we load 5 images from here...
         Don't forget the info dict for CRC debugging
         """
-        if self.data[4][item + self.min_samples - 1]:
-            if item == 0:  # if first item of the buffer
-                item += 1
-            elif item == self.__len__() - 1:  # if last item of the buffer
-                item -= 1
-            elif random.random() < 0.5:  # otherwise, sample randomly
-                item += 1
-            else:
-                item -= 1
+        item = self.ensure_valid_transition_index(item)
 
         idx_last = item + self.min_samples - 1
         idx_now = item + self.min_samples
@@ -345,15 +397,7 @@ class MemoryTMLidarProgress(MemoryTM):
         So we load 5 images from here...
         Don't forget the info dict for CRC debugging
         """
-        if self.data[4][item + self.min_samples - 1]:
-            if item == 0:  # if first item of the buffer
-                item += 1
-            elif item == self.__len__() - 1:  # if last item of the buffer
-                item -= 1
-            elif random.random() < 0.5:  # otherwise, sample randomly
-                item += 1
-            else:
-                item -= 1
+        item = self.ensure_valid_transition_index(item)
 
         idx_last = item + self.min_samples - 1
         idx_now = item + self.min_samples
@@ -466,15 +510,7 @@ class MemoryTMFull(MemoryTM):
         So we load 5 images from here...
         Don't forget the info dict for CRC debugging
         """
-        if self.data[4][item + self.min_samples - 1]:
-            if item == 0:  # if first item of the buffer
-                item += 1
-            elif item == self.__len__() - 1:  # if last item of the buffer
-                item -= 1
-            elif random.random() < 0.5:  # otherwise, sample randomly
-                item += 1
-            else:
-                item -= 1
+        item = self.ensure_valid_transition_index(item)
 
         idx_last = item + self.min_samples - 1
         idx_now = item + self.min_samples

@@ -641,7 +641,7 @@ class SquashedGaussianVanillaColorCNNActor(SquashedGaussianVanillaCNNActor):
         speed, gear, rpm, images, act1, act2 = obs
         images = remove_colors(images)
         obs = (speed, gear, rpm, images, act1, act2)
-        return super().forward(obs, test=False, with_logprob=True)
+        return super().forward(obs, test=test, with_logprob=with_logprob)
 
 
 class VanillaColorCNNQFunction(VanillaCNNQFunction):

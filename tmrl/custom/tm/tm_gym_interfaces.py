@@ -353,5 +353,100 @@ class TM2020InterfaceLidarProgress(TM2020InterfaceLidar):
         return spaces.Tuple((speed, progress, imgs))
 
 
+# RL² wrappers ==========================================================================================================
+#
+# Skeletons for task #5. Each wrapper:
+#   - draws per-episode random meta-distribution params on reset()
+#       action_scale ~ U(0.85, 1.15) per dim
+#       action_noise_std ~ U(0, 0.05) per dim
+#       sensor_noise_std ~ U(0, small)
+#       script_prefix_action: random throttle ∈ [0.3,1.0], steer ∈ [-0.5,0.5]
+#       script_prefix_len   ~ U(10, 40)
+#   - applies action_scale + additive action noise in send_control
+#   - adds sensor noise to scalar observations in get_obs_rew_terminated_info
+#   - during the scripted prefix, ignores the policy action (uses the scripted one),
+#     and zeros the reward
+#   - augments the observation tuple with (a_prev, r_prev, d_prev)
+
+
+def _draw_meta_params(rng: np.random.Generator, act_dim: int):
+    """Returns a dict of per-episode randomization params."""
+    raise NotImplementedError
+
+
+class TM2020InterfaceLidarRL2(TM2020InterfaceLidarProgress):
+    """RL² wrapper over the lidar-progress interface. Used for the initial smoke test."""
+
+    def __init__(self, *args, sensor_noise_max: float = 0.02,
+                 action_noise_max: float = 0.05,
+                 action_scale_low: float = 0.85, action_scale_high: float = 1.15,
+                 script_prefix_min: int = 10, script_prefix_max: int = 40, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.sensor_noise_max = sensor_noise_max
+        self.action_noise_max = action_noise_max
+        self.action_scale_low = action_scale_low
+        self.action_scale_high = action_scale_high
+        self.script_prefix_min = script_prefix_min
+        self.script_prefix_max = script_prefix_max
+        self._rng = np.random.default_rng()
+        self._meta = None
+        self._prefix_remaining = 0
+        self._a_prev = None
+        self._r_prev = 0.0
+        self._d_prev = 1.0
+
+    def _reset_meta(self):
+        raise NotImplementedError
+
+    def reset(self, seed=None, options=None):
+        raise NotImplementedError
+
+    def send_control(self, control):
+        raise NotImplementedError
+
+    def get_obs_rew_terminated_info(self):
+        raise NotImplementedError
+
+    def get_observation_space(self):
+        raise NotImplementedError
+
+
+class TM2020InterfaceRL2(TM2020Interface):
+    """RL² wrapper over the full-image interface. Production target."""
+
+    def __init__(self, *args, sensor_noise_max: float = 0.02,
+                 action_noise_max: float = 0.05,
+                 action_scale_low: float = 0.85, action_scale_high: float = 1.15,
+                 script_prefix_min: int = 10, script_prefix_max: int = 40, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.sensor_noise_max = sensor_noise_max
+        self.action_noise_max = action_noise_max
+        self.action_scale_low = action_scale_low
+        self.action_scale_high = action_scale_high
+        self.script_prefix_min = script_prefix_min
+        self.script_prefix_max = script_prefix_max
+        self._rng = np.random.default_rng()
+        self._meta = None
+        self._prefix_remaining = 0
+        self._a_prev = None
+        self._r_prev = 0.0
+        self._d_prev = 1.0
+
+    def _reset_meta(self):
+        raise NotImplementedError
+
+    def reset(self, seed=None, options=None):
+        raise NotImplementedError
+
+    def send_control(self, control):
+        raise NotImplementedError
+
+    def get_obs_rew_terminated_info(self):
+        raise NotImplementedError
+
+    def get_observation_space(self):
+        raise NotImplementedError
+
+
 if __name__ == "__main__":
     pass
