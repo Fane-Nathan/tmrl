@@ -207,7 +207,10 @@ UPDATER_FN = update_run_instance if ALG_NAME in ["SAC", "REDQSAC"] else None
 #   RL2_TRANSFORMER_MAX_LEN: int = 128
 
 if getattr(cfg, "PRAGMA_RL2", False):
-    from tmrl.custom.custom_models_transformer import TransformerREDQActorCritic
+    from tmrl.custom.custom_models_transformer import (
+        TransformerREDQActorCritic,
+        TransformerActorOnly,
+    )
     from tmrl.custom.custom_algorithms import RecurrentREDQSACAgent
     from tmrl.custom.custom_memories_sequence import (
         SequenceMemory,
@@ -219,7 +222,9 @@ if getattr(cfg, "PRAGMA_RL2", False):
         TM2020InterfaceRL2,
     )
 
-    # Model: Transformer-trunk REDQ actor-critic, configured via cfg.
+    # Model: Transformer-trunk REDQ actor-critic for training; standalone actor
+    # for the rollout worker. Both read the same config_constants hyperparameters,
+    # so their architectures and state_dict keys line up.
     TRAIN_MODEL = partial(
         TransformerREDQActorCritic,
         n=ALG_CONFIG.get("REDQ_N", 10),
@@ -229,6 +234,7 @@ if getattr(cfg, "PRAGMA_RL2", False):
         ffn_dim=cfg.RL2_TRANSFORMER_FFN,
         max_len=cfg.RL2_TRANSFORMER_MAX_LEN,
     )
+    POLICY = TransformerActorOnly
 
     # Interface: lidar-progress for initial smoke-test, image for production.
     if cfg.PRAGMA_LIDAR:
@@ -253,11 +259,17 @@ if getattr(cfg, "PRAGMA_RL2", False):
         SAMPLE_COMPRESSOR = get_local_buffer_sample_tm20_imgs_rl2
         OBS_PREPROCESSOR = obs_preprocessor_tm_act_in_obs
 
-    # Re-build CONFIG_DICT so rtgym uses the RL² interface.
+    # Re-build CONFIG_DICT so rtgym uses the RL² interface. We disable rtgym's
+    # action-in-obs append because the RL² wrapper provides (a_prev, r_prev, d_prev)
+    # as the last three obs components — the actor extracts them via obs[-3:]. If
+    # rtgym also appended an action buffer, those positions would shift and the
+    # actor would read the wrong values.
     CONFIG_DICT = rtgym.DEFAULT_CONFIG_DICT.copy()
     CONFIG_DICT["interface"] = INT
     for k, v in CONFIG_DICT_MODIFIERS.items():
         CONFIG_DICT[k] = v
+    CONFIG_DICT["act_buf_len"] = 0
+    CONFIG_DICT["act_in_obs"] = False
 
     # Memory: SequenceMemory (no imgs_obs / act_buf_len args).
     MEM = SequenceMemory

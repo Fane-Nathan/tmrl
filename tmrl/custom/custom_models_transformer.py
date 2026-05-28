@@ -325,6 +325,98 @@ class TransformerREDQActorCritic(nn.Module):
         return self.actor.act(obs, test=test)
 
 
+class TransformerActorOnly(TorchActorModule):
+    """Standalone actor policy for the rollout worker.
+
+    The rollout worker constructs `POLICY(observation_space, action_space)` and
+    calls `.act(obs)` on it. It owns its own embedder + causal trunk + actor
+    head; the submodule attribute names (`embedder`, `trunk`, `mu_layer`,
+    `log_std_layer`) match the attribute names of `TransformerActorHead`, so its
+    state_dict keys are identical to what the trainer saves when it exports
+    `model.actor` (which is the actor head with `trunk`/`embedder` as referenced
+    submodules). No key remapping needed at load time.
+
+    Hyperparameters are read from `tmrl.config.config_constants`.
+    """
+
+    def __init__(self, observation_space, action_space):
+        super().__init__(observation_space, action_space)
+        import tmrl.config.config_constants as cfg
+        obs_dim, tuple_obs = _compute_obs_dim(observation_space)
+        act_dim = int(action_space.shape[0])
+
+        self.embedder = TimestepEmbedder(
+            obs_dim=obs_dim, act_dim=act_dim,
+            d_model=cfg.RL2_TRANSFORMER_D_MODEL,
+        )
+        self.trunk = CausalTransformerTrunk(
+            d_model=cfg.RL2_TRANSFORMER_D_MODEL,
+            n_layers=cfg.RL2_TRANSFORMER_LAYERS,
+            n_heads=cfg.RL2_TRANSFORMER_HEADS,
+            ffn_dim=cfg.RL2_TRANSFORMER_FFN,
+            max_len=cfg.RL2_TRANSFORMER_MAX_LEN,
+            dropout=0.1,
+        )
+        self.mu_layer = nn.Linear(cfg.RL2_TRANSFORMER_D_MODEL, act_dim)
+        self.log_std_layer = nn.Linear(cfg.RL2_TRANSFORMER_D_MODEL, act_dim)
+        self.act_limit = float(action_space.high[0])
+        self.tuple_obs = tuple_obs
+        self.obs_dim = obs_dim
+        self.act_dim = act_dim
+        self._history: deque = deque(maxlen=self.trunk.max_len)
+
+    def reset_history(self):
+        self._history.clear()
+
+    @torch.no_grad()
+    def act(self, obs, test: bool = False):
+        assert isinstance(obs, (tuple, list)) and len(obs) >= 4, \
+            "RL² actor expects a tuple obs with last 3 elements = (a_prev, r_prev, d_prev)"
+        device = next(self.parameters()).device
+        a_prev_arr = obs[-3]
+        r_prev_arr = obs[-2]
+        d_prev_arr = obs[-1]
+        r_prev_scalar = float(np.asarray(r_prev_arr).reshape(-1)[0])
+        d_prev_scalar = float(np.asarray(d_prev_arr).reshape(-1)[0])
+
+        if d_prev_scalar >= 0.5:
+            self._history.clear()
+
+        if self.tuple_obs:
+            parts = []
+            for o in obs:
+                t = torch.as_tensor(o, device=device, dtype=torch.float32).reshape(-1)
+                parts.append(t)
+            obs_flat = torch.cat(parts, dim=-1)
+        else:
+            obs_flat = torch.as_tensor(obs, device=device, dtype=torch.float32).reshape(-1)
+        a_t_now = torch.as_tensor(a_prev_arr, device=device, dtype=torch.float32).reshape(-1)
+        r_t_now = torch.as_tensor([r_prev_scalar], device=device, dtype=torch.float32)
+        d_t_now = torch.as_tensor([d_prev_scalar], device=device, dtype=torch.float32)
+        self._history.append((obs_flat, a_t_now, r_t_now, d_t_now))
+
+        if len(self._history) == 0:
+            zeros_obs = torch.zeros((1, 1, self.obs_dim), device=device)
+            zeros_a = torch.zeros((1, 1, self.act_dim), device=device)
+            zeros_r = torch.zeros((1, 1, 1), device=device)
+            ones_d = torch.ones((1, 1, 1), device=device)
+            obs_t, a_t, r_t, d_t = zeros_obs, zeros_a, zeros_r, ones_d
+        else:
+            obs_list, a_list, r_list, d_list = zip(*self._history)
+            obs_t = torch.stack(obs_list, dim=0).unsqueeze(0)
+            a_t = torch.stack(a_list, dim=0).unsqueeze(0)
+            r_t = torch.stack(r_list, dim=0).unsqueeze(0)
+            d_t = torch.stack(d_list, dim=0).unsqueeze(0)
+
+        x = self.embedder(obs_t, a_t, r_t, d_t)
+        hidden = self.trunk(x)
+        mu = self.mu_layer(hidden[:, -1])
+        log_std = self.log_std_layer(hidden[:, -1])
+        a, _ = _squashed_gaussian_sample(mu, log_std, self.act_limit,
+                                         test=test, with_logprob=False)
+        return a.squeeze(0).cpu().numpy()
+
+
 # Smoke test ============================================================================================================
 
 def _smoke_test():
