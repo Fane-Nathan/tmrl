@@ -32,6 +32,28 @@ from tmrl.memory import TorchMemory
 from tmrl.util import collate_torch
 
 
+# Sample compressor for the RL² lidar-progress wrapper.
+# obs structure: (speed, progress, lidar, a_prev, r_prev, d_prev).
+# We keep the last 19 lidar samples (matching the existing lidar compressor),
+# and pass the RL² augmentation through unchanged.
+def get_local_buffer_sample_lidar_progress_rl2(prev_act, obs, rew, terminated,
+                                                truncated, info):
+    obs_mod = (obs[0], obs[1], obs[2][-19:], obs[3], obs[4], obs[5])
+    rew_mod = np.float32(rew)
+    return prev_act, obs_mod, rew_mod, terminated, truncated, info
+
+
+# Sample compressor for the RL² image wrapper.
+# obs structure: (speed, gear, rpm, imgs, a_prev, r_prev, d_prev).
+# Keeps only the most recent image like the existing image compressor, casts to uint8.
+def get_local_buffer_sample_tm20_imgs_rl2(prev_act, obs, rew, terminated,
+                                           truncated, info):
+    obs_mod = (obs[0], obs[1], obs[2],
+               (obs[3][-1] * 256.0).astype(np.uint8),
+               obs[4], obs[5], obs[6])
+    return prev_act, obs_mod, rew, terminated, truncated, info
+
+
 class SequenceMemory(TorchMemory):
     def __init__(self,
                  burn_in: int = 20,
