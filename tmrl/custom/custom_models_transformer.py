@@ -209,15 +209,27 @@ class TransformerActorHead(TorchActorModule):
 
     @torch.no_grad()
     def act(self, obs, test: bool = False):
-        """Inference. obs is the unaugmented env obs (tuple or array).
+        """Inference. obs is a tuple where the last 3 elements are
+        (a_prev_arr, r_prev_arr, d_prev_arr) — packed in by the RL² env wrapper.
 
-        The env wrapper is responsible for appending (obs, a_prev, r_prev, d_prev) into
-        the actor's history via push_transition() *before* calling act(). On the very
-        first call after reset (no prior step), the history is empty and we treat
-        d_prev=1.
+        This avoids any need for the rollout worker to know about RL² state:
+        the env wrapper tracks (a_prev, r_prev, d_prev) and embeds them in obs,
+        and the actor extracts them here before pushing to its internal history.
         """
+        assert isinstance(obs, (tuple, list)) and len(obs) >= 4, \
+            "RL² actor expects a tuple obs with at least 4 elements (last 3 = a_prev, r_prev, d_prev)"
         device = next(self.parameters()).device
-        # History tensors are already flat [1, T, *]; bypass flatten_obs_seq.
+        a_prev_arr = obs[-3]
+        r_prev_arr = obs[-2]
+        d_prev_arr = obs[-1]
+        r_prev_scalar = float(np.asarray(r_prev_arr).reshape(-1)[0])
+        d_prev_scalar = float(np.asarray(d_prev_arr).reshape(-1)[0])
+
+        if d_prev_scalar >= 0.5:
+            self._history.clear()
+
+        self.push_transition(obs, a_prev_arr, r_prev_scalar, d_prev_scalar)
+
         obs_t, a_t, r_t, d_t = self._history_to_seq(device)
         x = self.embedder(obs_t, a_t, r_t, d_t)
         hidden = self.trunk(x)
@@ -354,14 +366,27 @@ def _smoke_test():
     loss.backward()
     print(f"smoke OK  loss={loss.item():.4f}  pi_seq.shape={tuple(pi_seq.shape)}  q.shape={tuple(q0.shape)}")
 
-    # Inference path:
-    model_eval = model.eval()
-    actor = model_eval.actor
+    # Inference path: env wrapper packs (a_prev, r_prev, d_prev) as last 3 obs components.
+    # The model's observation_space should include them; here we construct an *augmented*
+    # space for the inference test.
+    obs_space_aug = spaces.Tuple((
+        spaces.Box(low=0.0, high=1.0, shape=(1,)),
+        spaces.Box(low=0.0, high=1.0, shape=(1,)),
+        spaces.Box(low=0.0, high=1.0, shape=(1, 19)),
+        spaces.Box(low=-1.0, high=1.0, shape=(3,)),  # a_prev
+        spaces.Box(low=-np.inf, high=np.inf, shape=(1,)),  # r_prev
+        spaces.Box(low=0.0, high=1.0, shape=(1,)),  # d_prev
+    ))
+    model_inf = TransformerREDQActorCritic(obs_space_aug, act_space, n=4, d_model=32,
+                                           n_layers=2, n_heads=2, ffn_dim=64, max_len=128)
+    actor = model_inf.actor
     actor.reset_history()
     fake_obs = (np.zeros((1,), dtype=np.float32),
                 np.zeros((1,), dtype=np.float32),
-                np.zeros((1, 19), dtype=np.float32))
-    actor.push_transition(fake_obs, np.zeros(3, dtype=np.float32), 0.0, 1.0)
+                np.zeros((1, 19), dtype=np.float32),
+                np.zeros(3, dtype=np.float32),
+                np.zeros(1, dtype=np.float32),
+                np.ones(1, dtype=np.float32))  # d_prev=1 ⇒ episode-start signal
     a = actor.act(fake_obs, test=True)
     assert a.shape == (3,), f"a: {a.shape}"
     print(f"inference OK  a={a}")

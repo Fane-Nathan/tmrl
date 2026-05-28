@@ -355,97 +355,214 @@ class TM2020InterfaceLidarProgress(TM2020InterfaceLidar):
 
 # RL² wrappers ==========================================================================================================
 #
-# Skeletons for task #5. Each wrapper:
-#   - draws per-episode random meta-distribution params on reset()
-#       action_scale ~ U(0.85, 1.15) per dim
-#       action_noise_std ~ U(0, 0.05) per dim
-#       sensor_noise_std ~ U(0, small)
-#       script_prefix_action: random throttle ∈ [0.3,1.0], steer ∈ [-0.5,0.5]
-#       script_prefix_len   ~ U(10, 40)
-#   - applies action_scale + additive action noise in send_control
-#   - adds sensor noise to scalar observations in get_obs_rew_terminated_info
-#   - during the scripted prefix, ignores the policy action (uses the scripted one),
-#     and zeros the reward
-#   - augments the observation tuple with (a_prev, r_prev, d_prev)
+# Per-episode meta-distribution randomization:
+#   action_scale     ~ U(action_scale_low, action_scale_high) per action dim
+#   action_noise_std ~ U(0, action_noise_max), Gaussian noise added per step
+#   sensor_noise_std ~ U(0, sensor_noise_max), Gaussian noise on scalar obs per step
+#   script_prefix_action: random throttle ∈ [0.3, 1.0], steer ∈ [-0.5, 0.5], fixed across prefix
+#   script_prefix_len   ~ U(script_prefix_min, script_prefix_max + 1)
+#
+# Observation augmentation: each wrapper packs (a_prev, r_prev, d_prev) as the last
+# 3 elements of the observation tuple. The RL² actor extracts these in act().
+#
+# Action convention: the action stored as "a_prev" (and seen by the policy in obs[-3])
+# is the POLICY action (pre-scale, pre-noise), so the agent observes its emitted action.
+# The env-side scale + noise are the meta-perturbations the agent must adapt to via
+# the resulting obs and reward.
+#
+# Reward: zeroed during the scripted prefix; the reward function itself still ticks
+# normally so the failure counters advance.
 
 
-def _draw_meta_params(rng: np.random.Generator, act_dim: int):
-    """Returns a dict of per-episode randomization params."""
-    raise NotImplementedError
+def _draw_meta_params(rng: np.random.Generator, act_dim: int,
+                      action_scale_low: float, action_scale_high: float,
+                      action_noise_max: float, sensor_noise_max: float,
+                      script_prefix_min: int, script_prefix_max: int) -> dict:
+    return {
+        "action_scale": rng.uniform(action_scale_low, action_scale_high,
+                                    size=act_dim).astype(np.float32),
+        "action_noise_std": float(rng.uniform(0.0, action_noise_max)),
+        "sensor_noise_std": float(rng.uniform(0.0, sensor_noise_max)),
+        "script_action": np.array([
+            float(rng.uniform(0.3, 1.0)),   # throttle
+            0.0,                             # no brake
+            float(rng.uniform(-0.5, 0.5)),   # steer
+        ], dtype=np.float32),
+        "script_len": int(rng.integers(script_prefix_min, script_prefix_max + 1)),
+    }
 
 
-class TM2020InterfaceLidarRL2(TM2020InterfaceLidarProgress):
-    """RL² wrapper over the lidar-progress interface. Used for the initial smoke test."""
+class _TM2020RL2Mixin:
+    """Shared RL² logic. Concrete wrappers below mix this into specific TM2020 bases.
 
-    def __init__(self, *args, sensor_noise_max: float = 0.02,
-                 action_noise_max: float = 0.05,
-                 action_scale_low: float = 0.85, action_scale_high: float = 1.15,
-                 script_prefix_min: int = 10, script_prefix_max: int = 40, **kwargs):
-        super().__init__(*args, **kwargs)
+    The mixin assumes the subclass provides:
+      - act_dim attribute (we initialize it in __init__)
+      - _inner_observation_space(): the base interface's observation_space (unaugmented)
+      - _inner_reset(seed, options): the base interface's reset (returns (obs, info))
+      - _inner_get_obs(): the base interface's get_obs_rew_terminated_info
+      - _inner_send_control(): the base interface's send_control
+    """
+
+    def _init_rl2(self, sensor_noise_max: float, action_noise_max: float,
+                  action_scale_low: float, action_scale_high: float,
+                  script_prefix_min: int, script_prefix_max: int,
+                  apply_sensor_noise_to_images: bool = False):
         self.sensor_noise_max = sensor_noise_max
         self.action_noise_max = action_noise_max
         self.action_scale_low = action_scale_low
         self.action_scale_high = action_scale_high
         self.script_prefix_min = script_prefix_min
         self.script_prefix_max = script_prefix_max
+        self.apply_sensor_noise_to_images = apply_sensor_noise_to_images
         self._rng = np.random.default_rng()
-        self._meta = None
+        self._meta: dict | None = None
         self._prefix_remaining = 0
-        self._a_prev = None
-        self._r_prev = 0.0
-        self._d_prev = 1.0
+        # Per-episode tracking
+        self.act_dim = 3
+        self._last_policy_action = np.zeros(self.act_dim, dtype=np.float32)
+        self._last_reward = 0.0
+        self._last_done = 1.0  # "just reset" signal for the first obs of an episode
 
-    def _reset_meta(self):
-        raise NotImplementedError
+    def _draw_meta(self) -> dict:
+        return _draw_meta_params(
+            self._rng, self.act_dim,
+            self.action_scale_low, self.action_scale_high,
+            self.action_noise_max, self.sensor_noise_max,
+            self.script_prefix_min, self.script_prefix_max,
+        )
 
-    def reset(self, seed=None, options=None):
-        raise NotImplementedError
+    def _meta_reset(self):
+        self._meta = self._draw_meta()
+        self._prefix_remaining = self._meta["script_len"]
+        self._last_policy_action = np.zeros(self.act_dim, dtype=np.float32)
+        self._last_reward = 0.0
+        self._last_done = 1.0
 
-    def send_control(self, control):
-        raise NotImplementedError
+    def _augment_obs(self, obs_inner) -> tuple:
+        return tuple(obs_inner) + (
+            self._last_policy_action.astype(np.float32, copy=True),
+            np.array([self._last_reward], dtype=np.float32),
+            np.array([self._last_done], dtype=np.float32),
+        )
 
-    def get_obs_rew_terminated_info(self):
-        raise NotImplementedError
+    def _augment_observation_space(self, inner_space):
+        a_prev = spaces.Box(low=-1.0, high=1.0, shape=(self.act_dim,))
+        r_prev = spaces.Box(low=-np.inf, high=np.inf, shape=(1,))
+        d_prev = spaces.Box(low=0.0, high=1.0, shape=(1,))
+        return spaces.Tuple(tuple(inner_space.spaces) + (a_prev, r_prev, d_prev))
 
-    def get_observation_space(self):
-        raise NotImplementedError
+    def _perturb_action(self, control):
+        if self._prefix_remaining > 0:
+            return self._meta["script_action"].copy()
+        scale = self._meta["action_scale"]
+        std = self._meta["action_noise_std"]
+        ctrl = np.asarray(control, dtype=np.float32)
+        noise = (self._rng.normal(0.0, std, size=ctrl.shape).astype(np.float32)
+                 if std > 0 else 0.0)
+        return np.clip(ctrl * scale + noise, -1.0, 1.0).astype(np.float32)
+
+    def _apply_sensor_noise(self, scalar_arr):
+        std = self._meta["sensor_noise_std"]
+        if std <= 0:
+            return scalar_arr
+        return (scalar_arr + self._rng.normal(0.0, std, size=scalar_arr.shape)
+                .astype(np.float32))
 
 
-class TM2020InterfaceRL2(TM2020Interface):
-    """RL² wrapper over the full-image interface. Production target."""
+class TM2020InterfaceLidarRL2(_TM2020RL2Mixin, TM2020InterfaceLidarProgress):
+    """RL² wrapper over the lidar-progress interface. Used for initial smoke testing."""
 
-    def __init__(self, *args, sensor_noise_max: float = 0.02,
+    def __init__(self, *args,
+                 sensor_noise_max: float = 0.02,
                  action_noise_max: float = 0.05,
                  action_scale_low: float = 0.85, action_scale_high: float = 1.15,
-                 script_prefix_min: int = 10, script_prefix_max: int = 40, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.sensor_noise_max = sensor_noise_max
-        self.action_noise_max = action_noise_max
-        self.action_scale_low = action_scale_low
-        self.action_scale_high = action_scale_high
-        self.script_prefix_min = script_prefix_min
-        self.script_prefix_max = script_prefix_max
-        self._rng = np.random.default_rng()
-        self._meta = None
-        self._prefix_remaining = 0
-        self._a_prev = None
-        self._r_prev = 0.0
-        self._d_prev = 1.0
-
-    def _reset_meta(self):
-        raise NotImplementedError
+                 script_prefix_min: int = 10, script_prefix_max: int = 40,
+                 **kwargs):
+        TM2020InterfaceLidarProgress.__init__(self, *args, **kwargs)
+        self._init_rl2(sensor_noise_max, action_noise_max,
+                       action_scale_low, action_scale_high,
+                       script_prefix_min, script_prefix_max)
 
     def reset(self, seed=None, options=None):
-        raise NotImplementedError
+        self._meta_reset()
+        obs_inner, info = TM2020InterfaceLidarProgress.reset(self, seed=seed, options=options)
+        return self._augment_obs(obs_inner), info
 
     def send_control(self, control):
-        raise NotImplementedError
+        if control is None:
+            TM2020InterfaceLidarProgress.send_control(self, control)
+            return
+        effective = self._perturb_action(control)
+        self._last_policy_action = np.asarray(control, dtype=np.float32).copy()
+        TM2020InterfaceLidarProgress.send_control(self, effective)
 
     def get_obs_rew_terminated_info(self):
-        raise NotImplementedError
+        obs_inner, rew, terminated, info = \
+            TM2020InterfaceLidarProgress.get_obs_rew_terminated_info(self)
+        speed, progress, imgs = obs_inner
+        speed = self._apply_sensor_noise(speed)
+        progress = self._apply_sensor_noise(progress)
+        if self.apply_sensor_noise_to_images:
+            imgs = self._apply_sensor_noise(imgs)
+        obs_inner = (speed, progress, imgs)
+        if self._prefix_remaining > 0:
+            rew = np.float32(0.0)
+            self._prefix_remaining -= 1
+        self._last_reward = float(rew)
+        self._last_done = 1.0 if bool(terminated) else 0.0
+        return self._augment_obs(obs_inner), rew, terminated, info
 
     def get_observation_space(self):
-        raise NotImplementedError
+        inner = TM2020InterfaceLidarProgress.get_observation_space(self)
+        return self._augment_observation_space(inner)
+
+
+class TM2020InterfaceRL2(_TM2020RL2Mixin, TM2020Interface):
+    """RL² wrapper over the full-image interface. Production target after lidar verifies."""
+
+    def __init__(self, *args,
+                 sensor_noise_max: float = 0.02,
+                 action_noise_max: float = 0.05,
+                 action_scale_low: float = 0.85, action_scale_high: float = 1.15,
+                 script_prefix_min: int = 10, script_prefix_max: int = 40,
+                 **kwargs):
+        TM2020Interface.__init__(self, *args, **kwargs)
+        self._init_rl2(sensor_noise_max, action_noise_max,
+                       action_scale_low, action_scale_high,
+                       script_prefix_min, script_prefix_max)
+
+    def reset(self, seed=None, options=None):
+        self._meta_reset()
+        obs_inner, info = TM2020Interface.reset(self, seed=seed, options=options)
+        return self._augment_obs(obs_inner), info
+
+    def send_control(self, control):
+        if control is None:
+            TM2020Interface.send_control(self, control)
+            return
+        effective = self._perturb_action(control)
+        self._last_policy_action = np.asarray(control, dtype=np.float32).copy()
+        TM2020Interface.send_control(self, effective)
+
+    def get_obs_rew_terminated_info(self):
+        obs_inner, rew, terminated, info = TM2020Interface.get_obs_rew_terminated_info(self)
+        speed, gear, rpm, imgs = obs_inner
+        speed = self._apply_sensor_noise(speed)
+        gear = self._apply_sensor_noise(gear)
+        rpm = self._apply_sensor_noise(rpm)
+        if self.apply_sensor_noise_to_images:
+            imgs = self._apply_sensor_noise(imgs.astype(np.float32)).astype(imgs.dtype, copy=False)
+        obs_inner = (speed, gear, rpm, imgs)
+        if self._prefix_remaining > 0:
+            rew = np.float32(0.0)
+            self._prefix_remaining -= 1
+        self._last_reward = float(rew)
+        self._last_done = 1.0 if bool(terminated) else 0.0
+        return self._augment_obs(obs_inner), rew, terminated, info
+
+    def get_observation_space(self):
+        inner = TM2020Interface.get_observation_space(self)
+        return self._augment_observation_space(inner)
 
 
 if __name__ == "__main__":
