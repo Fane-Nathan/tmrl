@@ -227,6 +227,18 @@ class TransformerActorHead(TorchActorModule):
                                          test=test, with_logprob=False)
         return a.squeeze(0).cpu().numpy()
 
+    def head_from_hidden(self, hidden: torch.Tensor, test: bool = False,
+                         with_logprob: bool = True):
+        """Apply mu/log_std/squashed-Gaussian sampling to a pre-computed hidden state.
+
+        hidden: [..., d_model]. Returns (action[..., act_dim], logp[...]) or (action, None).
+        Used by the agent to sample next-state actions from target-trunk hiddens
+        without re-running the actor's full forward pipe.
+        """
+        mu = self.mu_layer(hidden)
+        log_std = self.log_std_layer(hidden)
+        return _squashed_gaussian_sample(mu, log_std, self.act_limit, test, with_logprob)
+
     def push_transition(self, obs, a_prev, r_prev: float, d_prev: float):
         """Append a new step to the actor's history deque. Called by the env wrapper
         immediately before calling act() so the deque ends with the current obs and

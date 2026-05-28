@@ -471,25 +471,193 @@ class RecurrentREDQSACAgent(TrainingAgent):
     model_nograd = cached_property(lambda self: no_grad(copy_shared(self.model)))
 
     def __post_init__(self):
-        # Construct model, model_target (Q-side only target-copied), optimizers,
-        # alpha autotuning. Wiring identical in spirit to REDQSACAgent but with
-        # the transformer trunk and Q-only polyak.
-        raise NotImplementedError
+        observation_space, action_space = self.observation_space, self.action_space
+        self.device = self.device or ("cuda" if torch.cuda.is_available() else "cpu")
+        device = self.device
+
+        if self.model_cls is None:
+            from tmrl.custom.custom_models_transformer import TransformerREDQActorCritic
+            self.model_cls = TransformerREDQActorCritic
+
+        model_kwargs = {}
+        sig = inspect.signature(self.model_cls).parameters
+        if "n" in sig:
+            model_kwargs["n"] = self.n
+        model = self.model_cls(observation_space, action_space, **model_kwargs)
+        logging.debug(f" device RecurrentREDQ-SAC: {device}")
+        self.model = model.to(device)
+        self.model_target = no_grad(deepcopy(self.model))
+        actual_n = len(self.model.qs)
+        if actual_n != self.n:
+            logging.warning(
+                f"RecurrentREDQ model has {actual_n} Q-networks but agent was "
+                f"configured with n={self.n}; using {actual_n}."
+            )
+            self.n = actual_n
+
+        # Param groups: critic side (trunk + embedder + qs) vs actor head only.
+        critic_params = list(self.model.embedder.parameters()) \
+                      + list(self.model.trunk.parameters())
+        for q in self.model.qs:
+            critic_params += list(q.parameters())
+        actor_head_params = list(self.model.actor.mu_layer.parameters()) \
+                          + list(self.model.actor.log_std_layer.parameters())
+
+        self.q_optimizer = Adam(critic_params, lr=self.lr_critic)
+        self.pi_optimizer = Adam(actor_head_params, lr=self.lr_actor)
+        self.criterion = torch.nn.MSELoss(reduction="none")
+
+        self._critic_params = critic_params
+        self._actor_head_params = actor_head_params
+
+        self.i_update = 0
+        self.loss_pi = torch.zeros((1,), device=device)
+        self.loss_alpha_value = torch.zeros((1,), device=device)
+
+        if self.target_entropy is None:
+            self.target_entropy = -float(np.prod(action_space.shape))
+        else:
+            self.target_entropy = float(self.target_entropy)
+
+        if self.learn_entropy_coef:
+            self.log_alpha = torch.log(
+                torch.ones(1, device=self.device) * self.alpha
+            ).requires_grad_(True)
+            self.alpha_optimizer = Adam([self.log_alpha], lr=self.lr_entropy)
+        else:
+            self.alpha_t = torch.tensor(float(self.alpha), device=self.device)
 
     def get_actor(self):
-        raise NotImplementedError
+        return self.model_nograd.actor
+
+    @staticmethod
+    def _move_obs(obs, device):
+        if isinstance(obs, (tuple, list)):
+            return tuple(o.to(device) for o in obs)
+        return obs.to(device)
 
     def train(self, batch):
-        # batch is a dict with sequence tensors (see SequenceMemory.sample()).
-        # Steps:
-        #   1. Build embedder input from (obs, a_prev, r_prev, d_prev) over the whole window.
-        #   2. trunk forward once -> hidden[B,T,d_model].
-        #   3. Actor head reads hidden at positions [burn_in:] -> pi, logp on train_window.
-        #   4. For Q-target: shift the window by +1, run trunk again (separate forward) to
-        #      get hidden_next; sample m of n target Q-heads, take min over m, build backup.
-        #   5. Q-loss = MSE between Q_i(hidden, act) and backup, averaged on train_window only.
-        #   6. Policy loss = (alpha * logp - mean_i Q_i(hidden, pi)).mean over train_window.
-        #   7. Alpha loss as usual, on train_window logp.
-        #   8. grad clip; optimizer steps.
-        #   9. polyak update on trunk + critic heads only.
-        raise NotImplementedError
+        self.i_update += 1
+        update_policy = (self.i_update % self.q_updates_per_policy_update == 0)
+        device = self.device
+        burn_in = self.burn_in
+        train_window = self.train_window
+
+        obs_seq = self._move_obs(batch["obs"], device)
+        a_prev = batch["a_prev"].to(device)
+        r_prev = batch["r_prev"].to(device)
+        d_prev = batch["d_prev"].to(device)
+        # SequenceMemory returns mask of shape [B, seq_len]; slice to the
+        # train_window region so it lines up with the loss tensors.
+        train_mask_full = batch["train_mask"].to(device)
+        if train_mask_full.shape[1] == burn_in + train_window:
+            train_mask = train_mask_full[:, burn_in:]  # [B, train_window]
+        elif train_mask_full.shape[1] == train_window:
+            train_mask = train_mask_full
+        else:
+            raise ValueError(
+                f"train_mask shape {tuple(train_mask_full.shape)} not compatible "
+                f"with burn_in={burn_in}, train_window={train_window}"
+            )
+        mask_sum = train_mask.sum().clamp(min=1.0)
+
+        # ---- online trunk over the whole T+1 window ------------------------
+        hidden_online = self.model.encode(obs_seq, a_prev, r_prev, d_prev)
+        # hidden_online: [B, T+1, d_model]; T = burn_in + train_window
+
+        cur_hidden = hidden_online[:, burn_in:burn_in + train_window]   # [B, W, d_model]
+        # The "action taken at position p" is a_prev[:, p+1, :].
+        acts_taken = a_prev[:, burn_in + 1:burn_in + train_window + 1]  # [B, W, act_dim]
+        rewards = r_prev[:, burn_in + 1:burn_in + train_window + 1]     # [B, W]
+        dones = d_prev[:, burn_in + 1:burn_in + train_window + 1]       # [B, W] — always 0 in MVP
+
+        # ---- Q-target: target trunk over the whole window, then heads -----
+        with torch.no_grad():
+            hidden_target = self.model_target.encode(obs_seq, a_prev, r_prev, d_prev)
+            next_hidden_t = hidden_target[:, burn_in + 1:burn_in + train_window + 1]
+            a_next, logp_next = self.model.actor.head_from_hidden(
+                next_hidden_t, test=False, with_logprob=True
+            )
+            sample_idxs = np.random.choice(self.n, self.m, replace=False)
+            q_targets = torch.stack(
+                [self.model_target.qs[i](next_hidden_t, a_next) for i in sample_idxs],
+                dim=-1,
+            )  # [B, W, m]
+            min_q_target, _ = q_targets.min(dim=-1)  # [B, W]
+            alpha_t = (torch.exp(self.log_alpha.detach())
+                       if self.learn_entropy_coef else self.alpha_t)
+            backup = rewards + self.gamma * (1.0 - dones) * (min_q_target - alpha_t * logp_next)
+
+        # ---- Q-loss across all n online heads -----------------------------
+        loss_q = cur_hidden.new_zeros(())
+        for q in self.model.qs:
+            q_pred = q(cur_hidden, acts_taken)  # [B, W]
+            se = (q_pred - backup) ** 2
+            loss_q = loss_q + (se * train_mask).sum() / mask_sum
+
+        self.q_optimizer.zero_grad(set_to_none=True)
+        loss_q.backward()
+        torch.nn.utils.clip_grad_norm_(self._critic_params, self.grad_clip)
+        self.q_optimizer.step()
+
+        ret_dict = {"loss_critic": loss_q.detach().item()}
+
+        # ---- actor + alpha (every q_updates_per_policy_update steps) ------
+        if update_policy:
+            # Recompute hidden_online — its activations were freed by the Q backward.
+            # We re-run online trunk; the actor uses detached hidden so no trunk grad.
+            hidden_online2 = self.model.encode(obs_seq, a_prev, r_prev, d_prev)
+            cur_hidden_detached = hidden_online2[:, burn_in:burn_in + train_window].detach()
+            pi, logp_pi = self.model.actor.head_from_hidden(
+                cur_hidden_detached, test=False, with_logprob=True
+            )  # pi: [B, W, act_dim], logp_pi: [B, W]
+
+            # Q-heads frozen for the actor backward.
+            for q in self.model.qs:
+                q.requires_grad_(False)
+            qs_pi = torch.stack([q(cur_hidden_detached, pi) for q in self.model.qs], dim=-1)
+            mean_q_pi = qs_pi.mean(dim=-1)  # [B, W]
+
+            if self.learn_entropy_coef:
+                alpha_t_actor = torch.exp(self.log_alpha.detach())
+            else:
+                alpha_t_actor = self.alpha_t
+
+            actor_se = alpha_t_actor * logp_pi - mean_q_pi  # [B, W]
+            loss_pi = (actor_se * train_mask).sum() / mask_sum
+
+            self.pi_optimizer.zero_grad(set_to_none=True)
+            loss_pi.backward()
+            torch.nn.utils.clip_grad_norm_(self._actor_head_params, self.grad_clip)
+            self.pi_optimizer.step()
+
+            for q in self.model.qs:
+                q.requires_grad_(True)
+
+            self.loss_pi = loss_pi.detach()
+
+            if self.learn_entropy_coef:
+                loss_alpha = -(self.log_alpha *
+                               (logp_pi.detach() + self.target_entropy)) * train_mask
+                loss_alpha = loss_alpha.sum() / mask_sum
+                self.alpha_optimizer.zero_grad(set_to_none=True)
+                loss_alpha.backward()
+                self.alpha_optimizer.step()
+                self.loss_alpha_value = loss_alpha.detach()
+
+        ret_dict["loss_actor"] = self.loss_pi.detach().item()
+        if self.learn_entropy_coef:
+            ret_dict["loss_entropy_coef"] = self.loss_alpha_value.detach().item()
+            ret_dict["entropy_coef"] = torch.exp(self.log_alpha.detach()).item()
+
+        # ---- polyak update on trunk + embedder + Q-heads only -------------
+        with torch.no_grad():
+            online_modules = [self.model.embedder, self.model.trunk] + list(self.model.qs)
+            target_modules = [self.model_target.embedder, self.model_target.trunk] \
+                           + list(self.model_target.qs)
+            for online, target in zip(online_modules, target_modules):
+                for p, p_targ in zip(online.parameters(), target.parameters()):
+                    p_targ.data.mul_(self.polyak)
+                    p_targ.data.add_((1 - self.polyak) * p.data)
+
+        return ret_dict
