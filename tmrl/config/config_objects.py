@@ -27,7 +27,7 @@ assert ALG_NAME in ["SAC", "REDQSAC"], f"If you wish to implement {ALG_NAME}, do
 
 if cfg.PRAGMA_LIDAR:
     if cfg.PRAGMA_RNN:
-        assert ALG_NAME == "SAC", f"{ALG_NAME} is not implemented here."
+        assert ALG_NAME == "SAC" or cfg.PRAGMA_RL2, f"{ALG_NAME} is not implemented here."
         TRAIN_MODEL = RNNActorCritic
         POLICY = SquashedGaussianRNNActor
     else:
@@ -35,7 +35,7 @@ if cfg.PRAGMA_LIDAR:
         POLICY = SquashedGaussianMLPActor
 else:
     assert not cfg.PRAGMA_RNN, "RNNs not supported yet"
-    assert ALG_NAME == "SAC", f"{ALG_NAME} is not implemented here."
+    assert ALG_NAME == "SAC" or cfg.PRAGMA_RL2, f"{ALG_NAME} is not implemented here."
     TRAIN_MODEL = VanillaCNNActorCritic if cfg.GRAYSCALE else VanillaColorCNNActorCritic
     POLICY = SquashedGaussianVanillaCNNActor if cfg.GRAYSCALE else SquashedGaussianVanillaColorCNNActor
 
@@ -233,6 +233,9 @@ if getattr(cfg, "PRAGMA_RL2", False):
         n_heads=cfg.RL2_TRANSFORMER_HEADS,
         ffn_dim=cfg.RL2_TRANSFORMER_FFN,
         max_len=cfg.RL2_TRANSFORMER_MAX_LEN,
+        task_conditioning=cfg.RL2_TASK_CONDITIONING,
+        task_z_dim=cfg.RL2_TASK_Z_DIM,
+        num_tasks=cfg.RL2_TASK_NUM_TASKS,
     )
     POLICY = TransformerActorOnly
 

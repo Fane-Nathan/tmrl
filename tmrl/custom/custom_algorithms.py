@@ -467,6 +467,7 @@ class RecurrentREDQSACAgent(TrainingAgent):
     burn_in: int = 20
     train_window: int = 64
     grad_clip: float = 10.0
+    task_loss_coef: float = 0.05
 
     model_nograd = cached_property(lambda self: no_grad(copy_shared(self.model)))
 
@@ -498,6 +499,8 @@ class RecurrentREDQSACAgent(TrainingAgent):
         # Param groups: critic side (trunk + embedder + qs) vs actor head only.
         critic_params = list(self.model.embedder.parameters()) \
                       + list(self.model.trunk.parameters())
+        if getattr(self.model, "task_encoder", None) is not None:
+            critic_params += list(self.model.task_encoder.parameters())
         for q in self.model.qs:
             critic_params += list(q.parameters())
         actor_head_params = list(self.model.actor.mu_layer.parameters()) \
@@ -513,6 +516,17 @@ class RecurrentREDQSACAgent(TrainingAgent):
         self.i_update = 0
         self.loss_pi = torch.zeros((1,), device=device)
         self.loss_alpha_value = torch.zeros((1,), device=device)
+
+        # Instrumentation (surfaced in the per-round stats):
+        #   debug_actor_w_delta -> L2 change in actor mu-layer weights per actor
+        #                          update; ~0 means a frozen actor.
+        #   debug_pi_std        -> std of sampled actions; flat means no policy change.
+        #   debug_q_mean        -> mean online Q on taken actions; should plateau once
+        #                          the (now terminal-aware) critic stops over-estimating.
+        self._prev_mu_w = None
+        self._actor_w_delta = 0.0
+        self._pi_std = 0.0
+        self._q_mean = 0.0
 
         if self.target_entropy is None:
             self.target_entropy = -float(np.prod(action_space.shape))
@@ -564,23 +578,29 @@ class RecurrentREDQSACAgent(TrainingAgent):
         # ---- online trunk over the whole T+1 window ------------------------
         hidden_online = self.model.encode(obs_seq, a_prev, r_prev, d_prev)
         # hidden_online: [B, T+1, d_model]; T = burn_in + train_window
+        z_online, task_logits = self.model.infer_task(hidden_online)
 
         cur_hidden = hidden_online[:, burn_in:burn_in + train_window]   # [B, W, d_model]
+        cur_z = (z_online[:, burn_in:burn_in + train_window]
+                 if z_online is not None else None)
         # The "action taken at position p" is a_prev[:, p+1, :].
         acts_taken = a_prev[:, burn_in + 1:burn_in + train_window + 1]  # [B, W, act_dim]
         rewards = r_prev[:, burn_in + 1:burn_in + train_window + 1]     # [B, W]
-        dones = d_prev[:, burn_in + 1:burn_in + train_window + 1]       # [B, W] — always 0 in MVP
+        dones = d_prev[:, burn_in + 1:burn_in + train_window + 1]       # [B, W] — terminated-only; 1 at a true-termination next-state (truncation bootstraps)
 
         # ---- Q-target: target trunk over the whole window, then heads -----
         with torch.no_grad():
             hidden_target = self.model_target.encode(obs_seq, a_prev, r_prev, d_prev)
+            z_target, _ = self.model_target.infer_task(hidden_target)
             next_hidden_t = hidden_target[:, burn_in + 1:burn_in + train_window + 1]
+            next_z_t = (z_target[:, burn_in + 1:burn_in + train_window + 1]
+                        if z_target is not None else None)
             a_next, logp_next = self.model.actor.head_from_hidden(
-                next_hidden_t, test=False, with_logprob=True
+                next_hidden_t, z=next_z_t, test=False, with_logprob=True
             )
             sample_idxs = np.random.choice(self.n, self.m, replace=False)
             q_targets = torch.stack(
-                [self.model_target.qs[i](next_hidden_t, a_next) for i in sample_idxs],
+                [self.model_target.qs[i](next_hidden_t, a_next, next_z_t) for i in sample_idxs],
                 dim=-1,
             )  # [B, W, m]
             min_q_target, _ = q_targets.min(dim=-1)  # [B, W]
@@ -590,10 +610,31 @@ class RecurrentREDQSACAgent(TrainingAgent):
 
         # ---- Q-loss across all n online heads -----------------------------
         loss_q = cur_hidden.new_zeros(())
+        q_mean_acc = cur_hidden.new_zeros(())
         for q in self.model.qs:
-            q_pred = q(cur_hidden, acts_taken)  # [B, W]
+            q_pred = q(cur_hidden, acts_taken, cur_z)  # [B, W]
             se = (q_pred - backup) ** 2
             loss_q = loss_q + (se * train_mask).sum() / mask_sum
+            q_mean_acc = q_mean_acc + (q_pred.detach() * train_mask).sum() / mask_sum
+        self._q_mean = (q_mean_acc / self.n).item()
+
+        task_loss = None
+        task_acc = None
+        if task_logits is not None and "task_id" in batch:
+            task_ids = batch["task_id"].to(device).long()
+            task_logits_train = task_logits[:, burn_in:burn_in + train_window]
+            task_targets = task_ids.unsqueeze(1).expand(-1, train_window)
+            task_ce = torch.nn.functional.cross_entropy(
+                task_logits_train.reshape(-1, task_logits_train.shape[-1]),
+                task_targets.reshape(-1),
+                reduction="none",
+            ).reshape_as(train_mask)
+            task_loss = (task_ce * train_mask).sum() / mask_sum
+            loss_q = loss_q + self.task_loss_coef * task_loss
+            with torch.no_grad():
+                task_pred = task_logits_train.argmax(dim=-1)
+                task_acc = (((task_pred == task_targets).float() * train_mask).sum()
+                            / mask_sum)
 
         self.q_optimizer.zero_grad(set_to_none=True)
         loss_q.backward()
@@ -601,21 +642,32 @@ class RecurrentREDQSACAgent(TrainingAgent):
         self.q_optimizer.step()
 
         ret_dict = {"loss_critic": loss_q.detach().item()}
+        if task_loss is not None:
+            ret_dict["loss_task"] = task_loss.detach().item()
+            ret_dict["task_acc"] = task_acc.detach().item()
 
         # ---- actor + alpha (every q_updates_per_policy_update steps) ------
         if update_policy:
             # Recompute hidden_online — its activations were freed by the Q backward.
             # We re-run online trunk; the actor uses detached hidden so no trunk grad.
             hidden_online2 = self.model.encode(obs_seq, a_prev, r_prev, d_prev)
+            z_online2, _ = self.model.infer_task(hidden_online2)
             cur_hidden_detached = hidden_online2[:, burn_in:burn_in + train_window].detach()
+            cur_z_detached = (
+                z_online2[:, burn_in:burn_in + train_window].detach()
+                if z_online2 is not None else None
+            )
             pi, logp_pi = self.model.actor.head_from_hidden(
-                cur_hidden_detached, test=False, with_logprob=True
+                cur_hidden_detached, z=cur_z_detached, test=False, with_logprob=True
             )  # pi: [B, W, act_dim], logp_pi: [B, W]
 
             # Q-heads frozen for the actor backward.
             for q in self.model.qs:
                 q.requires_grad_(False)
-            qs_pi = torch.stack([q(cur_hidden_detached, pi) for q in self.model.qs], dim=-1)
+            qs_pi = torch.stack(
+                [q(cur_hidden_detached, pi, cur_z_detached) for q in self.model.qs],
+                dim=-1,
+            )
             mean_q_pi = qs_pi.mean(dim=-1)  # [B, W]
 
             if self.learn_entropy_coef:
@@ -635,6 +687,12 @@ class RecurrentREDQSACAgent(TrainingAgent):
                 q.requires_grad_(True)
 
             self.loss_pi = loss_pi.detach()
+            with torch.no_grad():
+                mu_w = self.model.actor.mu_layer.weight
+                if self._prev_mu_w is not None:
+                    self._actor_w_delta = (mu_w - self._prev_mu_w).norm().item()
+                self._prev_mu_w = mu_w.detach().clone()
+                self._pi_std = pi.detach().std().item()
 
             if self.learn_entropy_coef:
                 loss_alpha = -(self.log_alpha *
@@ -649,15 +707,86 @@ class RecurrentREDQSACAgent(TrainingAgent):
         if self.learn_entropy_coef:
             ret_dict["loss_entropy_coef"] = self.loss_alpha_value.detach().item()
             ret_dict["entropy_coef"] = torch.exp(self.log_alpha.detach()).item()
+        ret_dict["debug_actor_w_delta"] = self._actor_w_delta
+        ret_dict["debug_pi_std"] = self._pi_std
+        ret_dict["debug_q_mean"] = self._q_mean
 
         # ---- polyak update on trunk + embedder + Q-heads only -------------
         with torch.no_grad():
             online_modules = [self.model.embedder, self.model.trunk] + list(self.model.qs)
             target_modules = [self.model_target.embedder, self.model_target.trunk] \
                            + list(self.model_target.qs)
+            if getattr(self.model, "task_encoder", None) is not None:
+                online_modules.insert(2, self.model.task_encoder)
+                target_modules.insert(2, self.model_target.task_encoder)
             for online, target in zip(online_modules, target_modules):
                 for p, p_targ in zip(online.parameters(), target.parameters()):
                     p_targ.data.mul_(self.polyak)
                     p_targ.data.add_((1 - self.polyak) * p.data)
 
         return ret_dict
+
+
+def _smoke_test_recurrent_task_conditioned():
+    """Tiny CPU train step for task-conditioned RL2 REDQ-SAC."""
+    import gymnasium.spaces as spaces
+    from tmrl.custom.custom_models_transformer import TransformerREDQActorCritic
+
+    obs_space = spaces.Tuple((
+        spaces.Box(low=0.0, high=1.0, shape=(1,)),
+        spaces.Box(low=0.0, high=1.0, shape=(1,)),
+        spaces.Box(low=0.0, high=1.0, shape=(1, 19)),
+        spaces.Box(low=-1.0, high=1.0, shape=(3,)),
+        spaces.Box(low=-np.inf, high=np.inf, shape=(1,)),
+        spaces.Box(low=0.0, high=1.0, shape=(1,)),
+    ))
+    act_space = spaces.Box(low=-1.0, high=1.0, shape=(3,))
+
+    def model_cls(observation_space, action_space, n=2):
+        return TransformerREDQActorCritic(
+            observation_space, action_space,
+            n=n, d_model=16, n_layers=1, n_heads=2,
+            ffn_dim=32, max_len=16, dropout=0.0,
+            task_conditioning=True, task_z_dim=4, num_tasks=5,
+        )
+
+    burn_in, train_window = 2, 4
+    seq_len = burn_in + train_window
+    batch_size = 4
+    agent = RecurrentREDQSACAgent(
+        obs_space, act_space, device="cpu", model_cls=model_cls,
+        n=2, m=2, burn_in=burn_in, train_window=train_window,
+        q_updates_per_policy_update=1, learn_entropy_coef=True,
+        alpha=0.01, target_entropy=-0.5, task_loss_coef=0.05,
+    )
+
+    batch = {
+        "obs": (
+            torch.randn(batch_size, seq_len + 1, 1),
+            torch.randn(batch_size, seq_len + 1, 1),
+            torch.randn(batch_size, seq_len + 1, 1, 19),
+            torch.randn(batch_size, seq_len + 1, 3).tanh(),
+            torch.randn(batch_size, seq_len + 1, 1),
+            torch.zeros(batch_size, seq_len + 1, 1),
+        ),
+        "a_prev": torch.randn(batch_size, seq_len + 1, 3).tanh(),
+        "r_prev": torch.randn(batch_size, seq_len + 1),
+        "d_prev": torch.zeros(batch_size, seq_len + 1),
+        "train_mask": torch.cat([
+            torch.zeros(batch_size, burn_in),
+            torch.ones(batch_size, train_window),
+        ], dim=1),
+        "task_id": torch.tensor([0, 1, 2, 3], dtype=torch.long),
+    }
+
+    out = agent.train(batch)
+    assert "loss_critic" in out and np.isfinite(out["loss_critic"])
+    assert "loss_actor" in out and np.isfinite(out["loss_actor"])
+    assert "loss_task" in out and np.isfinite(out["loss_task"])
+    assert "task_acc" in out and 0.0 <= out["task_acc"] <= 1.0
+    print(f"smoke OK  loss_critic={out['loss_critic']:.4f}  "
+          f"loss_task={out['loss_task']:.4f}  task_acc={out['task_acc']:.3f}")
+
+
+if __name__ == "__main__":
+    _smoke_test_recurrent_task_conditioned()

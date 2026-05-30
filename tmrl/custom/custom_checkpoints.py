@@ -86,6 +86,24 @@ def update_run_instance(run_instance, training_cls):
         new_run_instance.total_samples = len(new_run_instance.memory)
         return new_run_instance
 
+    if getattr(cfg, "PRAGMA_RL2", False) and getattr(cfg, "RL2_TASK_CONDITIONING", False):
+        model = getattr(getattr(run_instance, "agent", None), "model", None)
+        task_mismatch = (
+            not getattr(model, "task_conditioning", False)
+            or getattr(model, "z_dim", None) != cfg.RL2_TASK_Z_DIM
+            or getattr(model, "num_tasks", None) != cfg.RL2_TASK_NUM_TASKS
+        )
+        if task_mismatch:
+            logging.warning(
+                "Task-conditioned RL2 architecture changed; rebuilding trainer "
+                "and preserving replay memory."
+            )
+            new_run_instance = training_cls()
+            new_run_instance.memory = run_instance.memory
+            new_run_instance = update_memory(new_run_instance, training_cls)
+            new_run_instance.total_samples = len(new_run_instance.memory)
+            return new_run_instance
+
     # update training Agent:
     ALG_CONFIG = cfg.TMRL_CONFIG["ALG"]
     ALG_NAME = ALG_CONFIG["ALGORITHM"]

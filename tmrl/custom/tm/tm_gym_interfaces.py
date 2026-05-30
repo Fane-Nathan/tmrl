@@ -377,12 +377,34 @@ class TM2020InterfaceLidarProgress(TM2020InterfaceLidar):
 def _draw_meta_params(rng: np.random.Generator, act_dim: int,
                       action_scale_low: float, action_scale_high: float,
                       action_noise_max: float, sensor_noise_max: float,
-                      script_prefix_min: int, script_prefix_max: int) -> dict:
+                      script_prefix_min: int, script_prefix_max: int,
+                      num_tasks: int = 1) -> dict:
+    task_id = int(rng.integers(0, max(1, num_tasks)))
+    profile = task_id % 5
+    action_scale = np.ones(act_dim, dtype=np.float32)
+    action_noise_std = 0.0
+    sensor_noise_std = 0.0
+
+    if num_tasks <= 1:
+        action_scale = rng.uniform(action_scale_low, action_scale_high,
+                                   size=act_dim).astype(np.float32)
+        action_noise_std = float(rng.uniform(0.0, action_noise_max))
+        sensor_noise_std = float(rng.uniform(0.0, sensor_noise_max))
+    elif profile == 1:
+        action_scale[-1] = np.float32(action_scale_low)
+    elif profile == 2:
+        action_scale[-1] = np.float32(action_scale_high)
+    elif profile == 3:
+        action_noise_std = float(action_noise_max)
+    elif profile == 4:
+        sensor_noise_std = float(sensor_noise_max)
+
     return {
-        "action_scale": rng.uniform(action_scale_low, action_scale_high,
-                                    size=act_dim).astype(np.float32),
-        "action_noise_std": float(rng.uniform(0.0, action_noise_max)),
-        "sensor_noise_std": float(rng.uniform(0.0, sensor_noise_max)),
+        "task_id": task_id,
+        "task_profile": profile,
+        "action_scale": action_scale,
+        "action_noise_std": action_noise_std,
+        "sensor_noise_std": sensor_noise_std,
         "script_action": np.array([
             float(rng.uniform(0.3, 1.0)),   # throttle
             0.0,                             # no brake
@@ -406,7 +428,8 @@ class _TM2020RL2Mixin:
     def _init_rl2(self, sensor_noise_max: float, action_noise_max: float,
                   action_scale_low: float, action_scale_high: float,
                   script_prefix_min: int, script_prefix_max: int,
-                  apply_sensor_noise_to_images: bool = False):
+                  apply_sensor_noise_to_images: bool = False,
+                  num_tasks: int = 1):
         self.sensor_noise_max = sensor_noise_max
         self.action_noise_max = action_noise_max
         self.action_scale_low = action_scale_low
@@ -414,6 +437,7 @@ class _TM2020RL2Mixin:
         self.script_prefix_min = script_prefix_min
         self.script_prefix_max = script_prefix_max
         self.apply_sensor_noise_to_images = apply_sensor_noise_to_images
+        self.num_tasks = max(1, int(num_tasks))
         self._rng = np.random.default_rng()
         self._meta: dict | None = None
         self._prefix_remaining = 0
@@ -429,6 +453,7 @@ class _TM2020RL2Mixin:
             self.action_scale_low, self.action_scale_high,
             self.action_noise_max, self.sensor_noise_max,
             self.script_prefix_min, self.script_prefix_max,
+            self.num_tasks,
         )
 
     def _meta_reset(self):
@@ -450,6 +475,12 @@ class _TM2020RL2Mixin:
         r_prev = spaces.Box(low=-np.inf, high=np.inf, shape=(1,))
         d_prev = spaces.Box(low=0.0, high=1.0, shape=(1,))
         return spaces.Tuple(tuple(inner_space.spaces) + (a_prev, r_prev, d_prev))
+
+    def _with_task_info(self, info):
+        info = dict(info or {})
+        info["rl2_task_id"] = int(self._meta.get("task_id", 0))
+        info["rl2_task_profile"] = int(self._meta.get("task_profile", 0))
+        return info
 
     def _perturb_action(self, control):
         if self._prefix_remaining > 0:
@@ -477,16 +508,18 @@ class TM2020InterfaceLidarRL2(_TM2020RL2Mixin, TM2020InterfaceLidarProgress):
                  action_noise_max: float = 0.05,
                  action_scale_low: float = 0.85, action_scale_high: float = 1.15,
                  script_prefix_min: int = 10, script_prefix_max: int = 40,
+                 num_tasks: int = 1,
                  **kwargs):
         TM2020InterfaceLidarProgress.__init__(self, *args, **kwargs)
         self._init_rl2(sensor_noise_max, action_noise_max,
                        action_scale_low, action_scale_high,
-                       script_prefix_min, script_prefix_max)
+                       script_prefix_min, script_prefix_max,
+                       num_tasks=num_tasks)
 
     def reset(self, seed=None, options=None):
         self._meta_reset()
         obs_inner, info = TM2020InterfaceLidarProgress.reset(self, seed=seed, options=options)
-        return self._augment_obs(obs_inner), info
+        return self._augment_obs(obs_inner), self._with_task_info(info)
 
     def send_control(self, control):
         if control is None:
@@ -510,7 +543,7 @@ class TM2020InterfaceLidarRL2(_TM2020RL2Mixin, TM2020InterfaceLidarProgress):
             self._prefix_remaining -= 1
         self._last_reward = float(rew)
         self._last_done = 1.0 if bool(terminated) else 0.0
-        return self._augment_obs(obs_inner), rew, terminated, info
+        return self._augment_obs(obs_inner), rew, terminated, self._with_task_info(info)
 
     def get_observation_space(self):
         inner = TM2020InterfaceLidarProgress.get_observation_space(self)
@@ -525,16 +558,18 @@ class TM2020InterfaceRL2(_TM2020RL2Mixin, TM2020Interface):
                  action_noise_max: float = 0.05,
                  action_scale_low: float = 0.85, action_scale_high: float = 1.15,
                  script_prefix_min: int = 10, script_prefix_max: int = 40,
+                 num_tasks: int = 1,
                  **kwargs):
         TM2020Interface.__init__(self, *args, **kwargs)
         self._init_rl2(sensor_noise_max, action_noise_max,
                        action_scale_low, action_scale_high,
-                       script_prefix_min, script_prefix_max)
+                       script_prefix_min, script_prefix_max,
+                       num_tasks=num_tasks)
 
     def reset(self, seed=None, options=None):
         self._meta_reset()
         obs_inner, info = TM2020Interface.reset(self, seed=seed, options=options)
-        return self._augment_obs(obs_inner), info
+        return self._augment_obs(obs_inner), self._with_task_info(info)
 
     def send_control(self, control):
         if control is None:
@@ -558,7 +593,7 @@ class TM2020InterfaceRL2(_TM2020RL2Mixin, TM2020Interface):
             self._prefix_remaining -= 1
         self._last_reward = float(rew)
         self._last_done = 1.0 if bool(terminated) else 0.0
-        return self._augment_obs(obs_inner), rew, terminated, info
+        return self._augment_obs(obs_inner), rew, terminated, self._with_task_info(info)
 
     def get_observation_space(self):
         inner = TM2020Interface.get_observation_space(self)
