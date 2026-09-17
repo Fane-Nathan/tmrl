@@ -24,7 +24,7 @@ if not cfg.GRAYSCALE:
 
 RAW_WM_CONFIG = cfg.TMRL_CONFIG.get("WORLD_MODEL", {})
 WM_CONFIG = WorldModelConfig.from_mapping(RAW_WM_CONFIG)
-RUN_NAME = RAW_WM_CONFIG.get("RUN_NAME", "WORLD_MODEL_V1")
+RUN_NAME = RAW_WM_CONFIG.get("RUN_NAME", "WORLD_MODEL_V1_1")
 
 
 def _requested_device(explicit_device, use_cuda):
@@ -135,6 +135,16 @@ TRAINER = partial(
 def make_worker(standalone=False):
     device = _validate_device(INFERENCE_DEVICE, "World-model inference")
     logging.info("World-model inference device: %s", _device_description(device))
+    logging.info(
+        "World-model exploration: epsilon %.2f -> %.2f over %d steps; gas %.2f-%.2f; steer rho %.2f std %.2f",
+        WM_CONFIG.bootstrap_epsilon_start,
+        WM_CONFIG.bootstrap_epsilon_end,
+        WM_CONFIG.bootstrap_exploration_steps,
+        WM_CONFIG.bootstrap_gas_min,
+        WM_CONFIG.bootstrap_gas_max,
+        WM_CONFIG.bootstrap_steer_rho,
+        WM_CONFIG.bootstrap_steer_std,
+    )
     return RolloutWorker(
         env_cls=ENV_CLS,
         actor_module_cls=POLICY,
