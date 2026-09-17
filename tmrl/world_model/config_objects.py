@@ -27,8 +27,11 @@ WM_CONFIG = WorldModelConfig.from_mapping(RAW_WM_CONFIG)
 RUN_NAME = RAW_WM_CONFIG.get("RUN_NAME", "WORLD_MODEL_V1")
 
 
-def _resolve_device(explicit_device, use_cuda, role):
-    device = str(explicit_device) if explicit_device else ("cuda:0" if use_cuda else "cpu")
+def _requested_device(explicit_device, use_cuda):
+    return str(explicit_device) if explicit_device else ("cuda:0" if use_cuda else "cpu")
+
+
+def _validate_device(device, role):
     if device.startswith("cuda"):
         if not torch.cuda.is_available():
             raise RuntimeError(
@@ -45,22 +48,14 @@ def _resolve_device(explicit_device, use_cuda, role):
     return device
 
 
-TRAINING_DEVICE = _resolve_device(
+TRAINING_DEVICE = _requested_device(
     RAW_WM_CONFIG.get("TRAINING_DEVICE"),
     cfg.CUDA_TRAINING,
-    "World-model training",
 )
-INFERENCE_DEVICE = _resolve_device(
+INFERENCE_DEVICE = _requested_device(
     RAW_WM_CONFIG.get("INFERENCE_DEVICE"),
     cfg.CUDA_INFERENCE,
-    "World-model inference",
 )
-
-# Fixed-size image batches benefit from cuDNN autotuning. Keep numerical precision
-# in float32 for v1; mixed precision can be benchmarked separately after correctness.
-if TRAINING_DEVICE.startswith("cuda"):
-    torch.backends.cudnn.benchmark = True
-    torch.set_float32_matmul_precision("high")
 
 
 def _device_description(device):
@@ -133,12 +128,13 @@ TRAINER = partial(
 
 
 def make_worker(standalone=False):
-    logging.info("World-model inference device: %s", _device_description(INFERENCE_DEVICE))
+    device = _validate_device(INFERENCE_DEVICE, "World-model inference")
+    logging.info("World-model inference device: %s", _device_description(device))
     return RolloutWorker(
         env_cls=ENV_CLS,
         actor_module_cls=POLICY,
         sample_compressor=SAMPLE_COMPRESSOR,
-        device=INFERENCE_DEVICE,
+        device=device,
         server_ip=cfg.SERVER_IP_FOR_WORKER,
         max_samples_per_episode=cfg.RW_MAX_SAMPLES_PER_EPISODE,
         model_path=MODEL_PATH_WORKER,
@@ -149,7 +145,13 @@ def make_worker(standalone=False):
 
 
 def make_trainer():
-    logging.info("World-model training device: %s", _device_description(TRAINING_DEVICE))
+    device = _validate_device(TRAINING_DEVICE, "World-model training")
+    if device.startswith("cuda"):
+        # Fixed-size image batches benefit from cuDNN autotuning. Keep numerical
+        # precision in float32 for v1; mixed precision can be benchmarked later.
+        torch.backends.cudnn.benchmark = True
+        torch.set_float32_matmul_precision("high")
+    logging.info("World-model training device: %s", _device_description(device))
     return Trainer(
         training_cls=TRAINER,
         server_ip=cfg.SERVER_IP_FOR_TRAINER,
