@@ -2,6 +2,7 @@
 
 # standard library imports
 import logging
+import os
 import time
 from collections import deque
 
@@ -27,6 +28,13 @@ from tmrl.custom.tm.utils.tools import Lidar, TM2020OpenPlanetClient, save_ghost
 CHECK_FORWARD = 500  # this allows (and rewards) 50m cuts
 
 
+def _env_flag(name, default=False):
+    value = os.getenv(name)
+    if value is None:
+        return bool(default)
+    return value.strip().lower() not in {"0", "false", "no", "off", ""}
+
+
 # Interface for Trackmania 2020 ========================================================================================
 
 class TM2020Interface(RealTimeGymInterface):
@@ -40,12 +48,12 @@ class TM2020Interface(RealTimeGymInterface):
                  grayscale: bool = True,
                  resize_to=(64, 64)):
         """
-        Base rtgym interface for TrackMania 2020 (Full environment)
+        Base rtgym interface for Trackmania 2020 (Full environment)
 
         Args:
             img_hist_len: int: history of images that are part of observations
             gamepad: bool: whether to use a virtual gamepad for control
-            save_replays: bool: whether to save TrackMania replays on successful episodes
+            save_replays: bool: whether to save Trackmania replays on successful episodes
             grayscale: bool: whether to output grayscale images or color images
             resize_to: Tuple[int, int]: resize output images to this (width, height)
         """
@@ -65,6 +73,20 @@ class TM2020Interface(RealTimeGymInterface):
         self.finish_reward = cfg.REWARD_CONFIG['END_OF_TRACK']
         self.constant_penalty = cfg.REWARD_CONFIG['CONSTANT_PENALTY']
 
+        world_model_config = cfg.TMRL_CONFIG.get("WORLD_MODEL", {})
+        self.reward_debug = _env_flag(
+            "TMRL_REWARD_DEBUG",
+            world_model_config.get("REWARD_DEBUG", False),
+        )
+        self.reward_debug_every = max(
+            1,
+            int(os.getenv(
+                "TMRL_REWARD_DEBUG_EVERY",
+                world_model_config.get("REWARD_DEBUG_EVERY", 5),
+            )),
+        )
+        self.last_control = np.zeros(3, dtype=np.float32)
+
         self.initialized = False
 
     def initialize_common(self):
@@ -82,8 +104,17 @@ class TM2020Interface(RealTimeGymInterface):
                                               nb_obs_backward=cfg.REWARD_CONFIG['CHECK_BACKWARD'],
                                               nb_zero_rew_before_failure=cfg.REWARD_CONFIG['FAILURE_COUNTDOWN'],
                                               min_nb_steps_before_failure=cfg.REWARD_CONFIG['MIN_STEPS'],
-                                              max_dist_from_traj=cfg.REWARD_CONFIG['MAX_STRAY'])
+                                              max_dist_from_traj=cfg.REWARD_CONFIG['MAX_STRAY'],
+                                              debug=self.reward_debug,
+                                              debug_every=self.reward_debug_every)
         self.client = TM2020OpenPlanetClient()
+        if self.reward_debug:
+            logging.info(
+                "Reward debug enabled (every %d step(s)); reward trajectory points=%d path=%s",
+                self.reward_debug_every,
+                self.reward_function.datalen,
+                cfg.REWARD_PATH,
+            )
 
     def initialize(self):
         self.initialize_common()
@@ -96,8 +127,10 @@ class TM2020Interface(RealTimeGymInterface):
         Applies the action given by the RL policy
         If control is None, does nothing (e.g. to record)
         Args:
-            control: np.array: [forward,backward,right,left]
+            control: np.array: [gas, brake, steer]
         """
+        if control is not None:
+            self.last_control = np.asarray(control, dtype=np.float32).copy()
         if self.gamepad:
             if control is not None:
                 control_gamepad(self.j, control)
@@ -196,7 +229,9 @@ class TM2020Interface(RealTimeGymInterface):
         rpm = np.array([
             data[10],
         ], dtype='float32')
-        rew, terminated = self.reward_function.compute_reward(pos=np.array([data[2], data[3], data[4]]))
+        pos = np.array([data[2], data[3], data[4]])
+        rew, terminated = self.reward_function.compute_reward(pos=pos)
+        base_reward = float(rew)
         self.img_hist.append(img)
         imgs = np.array(list(self.img_hist))
         obs = [speed, gear, rpm, imgs]
@@ -207,6 +242,47 @@ class TM2020Interface(RealTimeGymInterface):
             rew += self.finish_reward
         rew += self.constant_penalty
         rew = np.float32(rew)
+
+        if self.reward_debug and self.reward_function.last_debug is not None:
+            debug = self.reward_function.last_debug
+            should_log = (
+                debug["step"] % self.reward_debug_every == 0
+                or base_reward != 0.0
+                or terminated
+            )
+            debug_payload = {
+                **debug,
+                "speed": float(speed[0]),
+                "action": self.last_control.astype(float).tolist(),
+                "end_of_track": end_of_track,
+                "final_reward": float(rew),
+            }
+            info["reward_debug"] = debug_payload
+            if should_log:
+                logging.info(
+                    "REWARD_DEBUG step=%d speed=%.3f action=[gas=%.3f brake=%.3f steer=%.3f] "
+                    "pos=[%.3f %.3f %.3f] idx=%d->%d final_idx=%d delta=%+d "
+                    "dist=%.3f reward_base=%+.4f reward_final=%+.4f failure=%d terminated=%s finish=%s",
+                    debug["step"],
+                    float(speed[0]),
+                    float(self.last_control[0]),
+                    float(self.last_control[1]),
+                    float(self.last_control[2]),
+                    float(pos[0]),
+                    float(pos[1]),
+                    float(pos[2]),
+                    debug["previous_index"],
+                    debug["forward_best_index"],
+                    debug["final_index"],
+                    debug["index_delta"],
+                    debug["forward_min_dist"],
+                    base_reward,
+                    float(rew),
+                    debug["failure_counter"],
+                    terminated,
+                    end_of_track,
+                )
+
         return obs, rew, terminated, info
 
     def get_observation_space(self):
@@ -259,99 +335,3 @@ class TM2020InterfaceLidar(TM2020Interface):
         self.small_window = False
         self.lidar = Lidar(self.window_interface.screenshot())
         self.initialized = True
-
-    def reset(self, seed=None, options=None):
-        """
-        obs must be a list of numpy arrays
-        """
-        self.reset_common()
-        img, speed, data = self.grab_lidar_speed_and_data()
-        for _ in range(self.img_hist_len):
-            self.img_hist.append(img)
-        imgs = np.array(list(self.img_hist), dtype='float32')
-        obs = [speed, imgs]
-        self.reward_function.reset()
-        return obs, {}
-
-    def get_obs_rew_terminated_info(self):
-        """
-        returns the observation, the reward, and a terminated signal for end of episode
-        obs must be a list of numpy arrays
-        """
-        img, speed, data = self.grab_lidar_speed_and_data()
-        rew, terminated = self.reward_function.compute_reward(pos=np.array([data[2], data[3], data[4]]))
-        self.img_hist.append(img)
-        imgs = np.array(list(self.img_hist), dtype='float32')
-        obs = [speed, imgs]
-        end_of_track = bool(data[8])
-        info = {}
-        if end_of_track:
-            rew += self.finish_reward
-            terminated = True
-        rew += self.constant_penalty
-        rew = np.float32(rew)
-        return obs, rew, terminated, info
-
-    def get_observation_space(self):
-        """
-        must be a Tuple
-        """
-        speed = spaces.Box(low=0.0, high=1000.0, shape=(1, ))
-        imgs = spaces.Box(low=0.0, high=np.inf, shape=(
-            self.img_hist_len,
-            19,
-        ))  # lidars
-        return spaces.Tuple((speed, imgs))
-
-
-class TM2020InterfaceLidarProgress(TM2020InterfaceLidar):
-
-    def reset(self, seed=None, options=None):
-        """
-        obs must be a list of numpy arrays
-        """
-        self.reset_common()
-        img, speed, data = self.grab_lidar_speed_and_data()
-        for _ in range(self.img_hist_len):
-            self.img_hist.append(img)
-        imgs = np.array(list(self.img_hist), dtype='float32')
-        progress = np.array([0], dtype='float32')
-        obs = [speed, progress, imgs]
-        self.reward_function.reset()
-        return obs, {}
-
-    def get_obs_rew_terminated_info(self):
-        """
-        returns the observation, the reward, and a terminated signal for end of episode
-        obs must be a list of numpy arrays
-        """
-        img, speed, data = self.grab_lidar_speed_and_data()
-        rew, terminated = self.reward_function.compute_reward(pos=np.array([data[2], data[3], data[4]]))
-        progress = np.array([self.reward_function.cur_idx / self.reward_function.datalen], dtype='float32')
-        self.img_hist.append(img)
-        imgs = np.array(list(self.img_hist), dtype='float32')
-        obs = [speed, progress, imgs]
-        end_of_track = bool(data[8])
-        info = {}
-        if end_of_track:
-            rew += self.finish_reward
-            terminated = True
-        rew += self.constant_penalty
-        rew = np.float32(rew)
-        return obs, rew, terminated, info
-
-    def get_observation_space(self):
-        """
-        must be a Tuple
-        """
-        speed = spaces.Box(low=0.0, high=1000.0, shape=(1, ))
-        progress = spaces.Box(low=0.0, high=1.0, shape=(1,))
-        imgs = spaces.Box(low=0.0, high=np.inf, shape=(
-            self.img_hist_len,
-            19,
-        ))  # lidars
-        return spaces.Tuple((speed, progress, imgs))
-
-
-if __name__ == "__main__":
-    pass
