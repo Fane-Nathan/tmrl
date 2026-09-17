@@ -8,13 +8,13 @@ from tmrl.envs import GenericGymEnv
 from tmrl.networking import Trainer, RolloutWorker
 from tmrl.training_offline import TorchTrainingOffline
 from tmrl.custom.custom_memories import get_local_buffer_sample_tm20_imgs
-from tmrl.custom.tm.tm_gym_interfaces import TM2020Interface
 from tmrl.custom.tm.tm_preprocessors import obs_preprocessor_tm_act_in_obs
 from tmrl.util import partial
 from tmrl.world_model.actor import WorldModelActor
 from tmrl.world_model.agent import WorldModelAgent
 from tmrl.world_model.config import WorldModelConfig
 from tmrl.world_model.memory import WorldModelMemory
+from tmrl.world_model.tm_interface import WorldModelTM2020Interface
 
 
 if cfg.PRAGMA_LIDAR:
@@ -72,11 +72,16 @@ MODEL_PATH_TRAINER = str(cfg.WEIGHTS_FOLDER / f"{RUN_NAME}_t.tmod")
 CHECKPOINT_PATH = str(cfg.CHECKPOINTS_FOLDER / f"{RUN_NAME}_t.tcpt")
 
 INT = partial(
-    TM2020Interface,
+    WorldModelTM2020Interface,
     img_hist_len=cfg.IMG_HIST_LEN,
     gamepad=cfg.PRAGMA_GAMEPAD,
     grayscale=cfg.GRAYSCALE,
     resize_to=(cfg.IMG_WIDTH, cfg.IMG_HEIGHT),
+    validate_reward_start=RAW_WM_CONFIG.get("VALIDATE_REWARD_START", True),
+    reward_start_tolerance=RAW_WM_CONFIG.get(
+        "REWARD_START_TOLERANCE",
+        cfg.REWARD_CONFIG["MAX_STRAY"],
+    ),
 )
 CONFIG_DICT = rtgym.DEFAULT_CONFIG_DICT.copy()
 for key, value in cfg.ENV_CONFIG["RTGYM_CONFIG"].items():
