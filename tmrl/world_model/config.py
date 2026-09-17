@@ -29,6 +29,19 @@ class WorldModelConfig:
     grad_clip_norm: float = 10.0
     q_ensemble: int = 2
 
+    # Vehicle-aware cold-start exploration. During training only, the rollout
+    # worker mixes MPC with a forward-driving exploration policy. The epsilon
+    # schedule is based on local worker interaction count so weight broadcasts
+    # do not restart exploration.
+    bootstrap_exploration_steps: int = 15000
+    bootstrap_epsilon_start: float = 0.70
+    bootstrap_epsilon_end: float = 0.10
+    bootstrap_gas_min: float = 0.60
+    bootstrap_gas_max: float = 1.00
+    bootstrap_steer_rho: float = 0.90
+    bootstrap_steer_std: float = 0.30
+    bootstrap_steer_limit: float = 0.70
+
     @classmethod
     def from_mapping(cls, values):
         values = values or {}
