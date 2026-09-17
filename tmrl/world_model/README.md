@@ -16,6 +16,26 @@ competence as the original image-based TMRL SAC using fewer real environment
 steps**. It is not an ADAS stack and does not yet implement uncertainty/event
 modeling.
 
+## Run
+
+Use the same Trackmania/OpenPlanet/TmrlData setup as normal TMRL. Start the
+three components in separate terminals:
+
+```bash
+python -m tmrl.world_model.run server
+python -m tmrl.world_model.run trainer --wandb
+python -m tmrl.world_model.run worker
+```
+
+For standalone inference with the world-model weights:
+
+```bash
+python -m tmrl.world_model.run test
+```
+
+The world-model path defaults to `WORLD_MODEL_V1.tmod`, so it does not load or
+overwrite `SAC_4_imgs_pretrained.tmod`.
+
 ## Optional config
 
 Add a top-level `WORLD_MODEL` object to `~/TmrlData/config/config.json` to
