@@ -17,7 +17,9 @@ class RewardFunction:
                  nb_obs_backward=10,
                  nb_zero_rew_before_failure=10,
                  min_nb_steps_before_failure=int(3.5 * 20),
-                 max_dist_from_traj=60.0):
+                 max_dist_from_traj=60.0,
+                 debug=False,
+                 debug_every=1):
         """
         Instantiates a reward function for TM2020.
 
@@ -28,9 +30,11 @@ class RewardFunction:
             nb_zero_rew_before_failure: after this number of steps with no reward, episode is terminated
             min_nb_steps_before_failure: the episode must have at least this number of steps before failure
             max_dist_from_traj: the reward is 0 if the car is further than this distance from the demo trajectory
+            debug: whether to retain per-step reward diagnostics in ``last_debug``
+            debug_every: suggested logging interval for callers using ``last_debug``
         """
         if not os.path.exists(reward_data_path):
-            logging.debug(f" reward not found at path:{reward_data_path}")
+            logging.warning(f"reward not found at path:{reward_data_path}; using dummy reward trajectory")
             self.data = np.array([[0.0, 0.0, 0.0], [1.0, 1.0, 1.0]])  # dummy reward
         else:
             with open(reward_data_path, 'rb') as f:
@@ -45,6 +49,9 @@ class RewardFunction:
         self.step_counter = 0
         self.failure_counter = 0
         self.datalen = len(self.data)
+        self.debug = bool(debug)
+        self.debug_every = max(1, int(debug_every))
+        self.last_debug = None
 
         # self.traj = []
 
@@ -60,10 +67,11 @@ class RewardFunction:
 
         terminated = False
         self.step_counter += 1  # step counter to enable failure counter
+        previous_index = self.cur_idx
         min_dist = np.inf  # smallest distance found so far in the trajectory to the target pos
         index = self.cur_idx  # cur_idx is where we were last step in the trajectory
         temp = self.nb_obs_forward  # counter used to find cuts
-        best_index = 0  # index best matching the target pos
+        best_index = self.cur_idx  # index best matching the target pos
 
         while True:
             dist = np.linalg.norm(pos - self.data[index])  # distance of the current index to target pos
@@ -80,6 +88,9 @@ class RewardFunction:
                     best_index = self.cur_idx  # if so, consider we didn't move
 
                 break  # we found the best index and can break the while loop
+
+        forward_best_index = best_index
+        forward_min_dist = float(min_dist)
 
         # The reward is then proportional to the number of passed indexes (i.e., track distance):
         reward = (best_index - self.cur_idx) / 100.0
@@ -110,6 +121,22 @@ class RewardFunction:
         else:  # if we did progress on the track
             self.failure_counter = 0  # we reset the counter triggering episode termination
 
+        final_index = best_index
+        if self.debug:
+            self.last_debug = {
+                "step": int(self.step_counter),
+                "pos": np.asarray(pos, dtype=np.float64).copy(),
+                "previous_index": int(previous_index),
+                "forward_best_index": int(forward_best_index),
+                "final_index": int(final_index),
+                "index_delta": int(forward_best_index - previous_index),
+                "forward_min_dist": forward_min_dist,
+                "final_min_dist": float(min_dist),
+                "reward": float(reward),
+                "failure_counter": int(self.failure_counter),
+                "terminated": bool(terminated),
+            }
+
         self.cur_idx = best_index  # finally, we save our new best matching index
 
         return reward, terminated
@@ -127,5 +154,6 @@ class RewardFunction:
         self.cur_idx = 0
         self.step_counter = 0
         self.failure_counter = 0
+        self.last_debug = None
 
         # self.traj = []
