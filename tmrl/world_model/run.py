@@ -14,7 +14,10 @@ def main():
     args = parser.parse_args()
 
     if args.mode == "server":
-        Server()
+        # Keep a strong reference to the Server for the lifetime of this process.
+        # Without it, the object may be garbage-collected immediately, which
+        # tears down the tlspyo relay and causes trainer/worker connection refusals.
+        server = Server()
         while True:
             time.sleep(1.0)
     elif args.mode == "trainer":
