@@ -7,6 +7,7 @@ from torch.optim import Adam
 
 from tmrl.training import TrainingAgent
 from tmrl.custom.utils.nn import copy_shared, no_grad
+from tmrl.world_model.actions import canonicalize_tm_action
 from tmrl.world_model.actor import WorldModelActor
 from tmrl.world_model.config import WorldModelConfig
 from tmrl.world_model.models import WorldModelCore
@@ -84,7 +85,11 @@ class WorldModelAgent(TrainingAgent):
         pred_z = self.model.encode(_obs_at(obs_seq, 0))
 
         for t in range(horizon):
-            action = actions[:, t].float()
+            # Match the representation used by the physical gamepad: pedals are
+            # non-negative and simultaneous gas/brake is reduced to one net
+            # longitudinal command. Fresh V1.1 replay is already canonical, but
+            # this also makes accidental legacy samples unambiguous to the model.
+            action = canonicalize_tm_action(actions[:, t].float())
             reward = rewards[:, t].float()
             term = terminated[:, t].float()
             actual_z = self.model.encode(_obs_at(obs_seq, t))
@@ -97,7 +102,7 @@ class WorldModelAgent(TrainingAgent):
             reward_loss = reward_loss + F.smooth_l1_loss(reward_pred, reward)
 
             with torch.no_grad():
-                next_action = self.model.act_prior(next_z_target)
+                next_action = canonicalize_tm_action(self.model.act_prior(next_z_target))
                 backup = reward + self.wm_config.gamma * (1.0 - term) * self._target_min_q(
                     next_z_target, next_action
                 )
@@ -129,7 +134,7 @@ class WorldModelAgent(TrainingAgent):
         for q in self.model.qs:
             q.requires_grad_(False)
         z_policy = self.model.encode(_obs_at(obs_seq, 0)).detach()
-        policy_action = self.model.act_prior(z_policy)
+        policy_action = canonicalize_tm_action(self.model.act_prior(z_policy))
         policy_loss = -self.model.min_q(z_policy, policy_action).mean()
         self.policy_optimizer.zero_grad(set_to_none=True)
         (self.wm_config.policy_loss_coef * policy_loss).backward()
@@ -148,7 +153,10 @@ class WorldModelAgent(TrainingAgent):
                 "loss_q": q_loss.item(),
                 "loss_policy": policy_loss.item(),
                 "wm_reward_mean": rewards.mean().item(),
-                "wm_q_mean": self.model.min_q(z_policy, self.model.act_prior(z_policy)).mean().item(),
+                "wm_q_mean": self.model.min_q(
+                    z_policy,
+                    canonicalize_tm_action(self.model.act_prior(z_policy)),
+                ).mean().item(),
                 "wm_sequence_horizon": float(horizon),
                 "wm_positions_per_update": float(actions.shape[0] * horizon),
             }
