@@ -1,4 +1,7 @@
+import logging
+
 import rtgym
+import torch
 
 import tmrl.config.config_constants as cfg
 from tmrl.envs import GenericGymEnv
@@ -22,6 +25,52 @@ if not cfg.GRAYSCALE:
 RAW_WM_CONFIG = cfg.TMRL_CONFIG.get("WORLD_MODEL", {})
 WM_CONFIG = WorldModelConfig.from_mapping(RAW_WM_CONFIG)
 RUN_NAME = RAW_WM_CONFIG.get("RUN_NAME", "WORLD_MODEL_V1")
+
+
+def _resolve_device(explicit_device, use_cuda, role):
+    device = str(explicit_device) if explicit_device else ("cuda:0" if use_cuda else "cpu")
+    if device.startswith("cuda"):
+        if not torch.cuda.is_available():
+            raise RuntimeError(
+                f"{role} is configured for {device}, but torch.cuda.is_available() is False. "
+                "Install a CUDA-enabled PyTorch build for this Python environment, then verify with: "
+                "python -c \"import torch; print(torch.__version__, torch.version.cuda, torch.cuda.is_available())\""
+            )
+        index = torch.device(device).index
+        index = 0 if index is None else index
+        if index >= torch.cuda.device_count():
+            raise RuntimeError(
+                f"{role} requested {device}, but only {torch.cuda.device_count()} CUDA device(s) are visible."
+            )
+    return device
+
+
+TRAINING_DEVICE = _resolve_device(
+    RAW_WM_CONFIG.get("TRAINING_DEVICE"),
+    cfg.CUDA_TRAINING,
+    "World-model training",
+)
+INFERENCE_DEVICE = _resolve_device(
+    RAW_WM_CONFIG.get("INFERENCE_DEVICE"),
+    cfg.CUDA_INFERENCE,
+    "World-model inference",
+)
+
+# Fixed-size image batches benefit from cuDNN autotuning. Keep numerical precision
+# in float32 for v1; mixed precision can be benchmarked separately after correctness.
+if TRAINING_DEVICE.startswith("cuda"):
+    torch.backends.cudnn.benchmark = True
+    torch.set_float32_matmul_precision("high")
+
+
+def _device_description(device):
+    if not device.startswith("cuda"):
+        return "cpu"
+    index = torch.device(device).index
+    index = 0 if index is None else index
+    props = torch.cuda.get_device_properties(index)
+    return f"cuda:{index} ({props.name}, {props.total_memory / (1024 ** 3):.1f} GiB)"
+
 
 MODEL_PATH_WORKER = str(cfg.WEIGHTS_FOLDER / f"{RUN_NAME}.tmod")
 MODEL_PATH_TRAINER = str(cfg.WEIGHTS_FOLDER / f"{RUN_NAME}_t.tmod")
@@ -79,15 +128,17 @@ TRAINER = partial(
     update_buffer_interval=RAW_WM_CONFIG.get("UPDATE_BUFFER_INTERVAL", cfg.TMRL_CONFIG["UPDATE_BUFFER_INTERVAL"]),
     max_training_steps_per_env_step=RAW_WM_CONFIG.get("UPDATES_PER_ENV_STEP", 1.0),
     start_training=RAW_WM_CONFIG.get("START_TRAINING", 5000),
+    device=TRAINING_DEVICE,
 )
 
 
 def make_worker(standalone=False):
+    logging.info("World-model inference device: %s", _device_description(INFERENCE_DEVICE))
     return RolloutWorker(
         env_cls=ENV_CLS,
         actor_module_cls=POLICY,
         sample_compressor=SAMPLE_COMPRESSOR,
-        device="cuda" if cfg.CUDA_INFERENCE else "cpu",
+        device=INFERENCE_DEVICE,
         server_ip=cfg.SERVER_IP_FOR_WORKER,
         max_samples_per_episode=cfg.RW_MAX_SAMPLES_PER_EPISODE,
         model_path=MODEL_PATH_WORKER,
@@ -98,6 +149,7 @@ def make_worker(standalone=False):
 
 
 def make_trainer():
+    logging.info("World-model training device: %s", _device_description(TRAINING_DEVICE))
     return Trainer(
         training_cls=TRAINER,
         server_ip=cfg.SERVER_IP_FOR_TRAINER,
