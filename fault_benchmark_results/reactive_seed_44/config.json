@@ -1,0 +1,15 @@
+{
+  "algorithm": "reactive_robust_baseline",
+  "seed": 44,
+  "iterations": 100,
+  "collection_episodes_per_iter": 4,
+  "gradient_steps_per_iter": 100,
+  "utd": 10,
+  "batch_size": 64,
+  "use_layernorm": true,
+  "val_interval": 10,
+  "val_episodes": 10,
+  "test_episodes": 25,
+  "base_eval_seed": 50000,
+  "device": "cuda"
+}

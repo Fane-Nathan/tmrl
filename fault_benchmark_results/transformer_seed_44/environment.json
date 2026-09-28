@@ -1,0 +1,8 @@
+{
+  "python_version": "3.12.10 (tags/v3.12.10:0cc8128, Apr  8 2025, 12:21:36) [MSC v.1943 64 bit (AMD64)]",
+  "torch_version": "2.11.0+cu128",
+  "torch_cuda_build": "12.8",
+  "executable": "D:\\Project\\tmrl\\.venv\\Scripts\\python.exe",
+  "os_name": "nt",
+  "platform": "Windows-11-10.0.26200-SP0"
+}

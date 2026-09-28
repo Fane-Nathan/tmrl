@@ -1,0 +1,6 @@
+{
+  "status": "SUPERSEDED_BY_SENSOR_REVISION",
+  "current_report": "SENSOR_PILOT_QA.json",
+  "historical_report": "archived_actuator_notes/FINAL_QA.json",
+  "note": "The original report describes the earlier actuator-focused revision; it is preserved unchanged in the archive."
+}

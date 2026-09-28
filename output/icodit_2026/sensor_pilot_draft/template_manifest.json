@@ -1,0 +1,26 @@
+{
+  "source": "https://www.iaicconf.com/?attachment_id=14245&download=1",
+  "outer_archive_sha256": "2bf9c2d0d22483a927a5313eb06188b008590e0ba293f96b788a5f160b435959",
+  "inner_archive": "Full Paper Template/LaTex+Package.rar",
+  "class": "llncs 2.20 2018/03/10",
+  "files": [
+    {
+      "file": "llncs.cls",
+      "source_member": "Springer LaTex template/llncs.cls",
+      "sha256": "f1be281bc631f07c4405566d64b294ec8df018e75e6d6c6c643cbdd5806677a5",
+      "modified": false
+    },
+    {
+      "file": "splncs04.bst",
+      "source_member": "Springer LaTex template/splncs04.bst",
+      "sha256": "a370ad563909f7264038e3388d59036306c3ecd53c6de26279ba921f3a9979df",
+      "modified": false
+    },
+    {
+      "file": "Springer-template-readme.txt",
+      "source_member": "Springer LaTex template/readme.txt",
+      "sha256": "aa1a6501d48cb6170172f2ae18a75b8006eaca61cbecff1850cc47ad657197b1",
+      "modified": false
+    }
+  ]
+}

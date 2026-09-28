@@ -1,0 +1,38 @@
+[
+  {
+    "source_relative_path": "scripts/benchmark_fault_env.py",
+    "sha256": "67f791591137037db36d76eed93f9415ca02d593139f993cc4439506f3a55751",
+    "capture_date": "2026-09-15",
+    "historical_identity_verified": false
+  },
+  {
+    "source_relative_path": "scripts/train_transformer_fault_adaptation.py",
+    "sha256": "81ca09fe0f6207b191780cddb18a81df54c220111999712650cde53e8c446c16",
+    "capture_date": "2026-09-15",
+    "historical_identity_verified": false
+  },
+  {
+    "source_relative_path": "scripts/train_reactive_robust_baseline.py",
+    "sha256": "c3a945fceb3b79a5871b67709a2d10e4456627b8a8dc1241fbb9e22b7636f5d9",
+    "capture_date": "2026-09-15",
+    "historical_identity_verified": false
+  },
+  {
+    "source_relative_path": "scripts/confirmatory_logging.py",
+    "sha256": "51d8c47a5d7b0d3875fb78f8d0570589588936cc985ee52cf8a2f8c74089453a",
+    "capture_date": "2026-09-15",
+    "historical_identity_verified": false
+  },
+  {
+    "source_relative_path": "scripts/run_confirmatory_study.py",
+    "sha256": "af42d222febb9faaed8519b3420bc4b79db0631a5d90d5f005540a6c74b3f307",
+    "capture_date": "2026-09-15",
+    "historical_identity_verified": false
+  },
+  {
+    "source_relative_path": "scripts/generate_confirmatory_results.py",
+    "sha256": "ac359d6df47ab04335121e76a2fac6d5ef3977dc0fcee1cc87196576491a813e",
+    "capture_date": "2026-09-15",
+    "historical_identity_verified": false
+  }
+]

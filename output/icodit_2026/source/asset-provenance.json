@@ -1,0 +1,20 @@
+[
+  {
+    "source": "C:\\Users\\felix\\Documents\\Machine_Learning_Research\\paper_research\\fault_adaptation_result.png",
+    "copy": "D:\\Project\\tmrl\\output\\icodit_2026\\source\\fault_adaptation_result.png",
+    "sha256": "3f731b628da917f4a5dea573d8cb92fb3a200101bd504cdf3eec1acab8b6a544",
+    "bytes": 121339
+  },
+  {
+    "source": "C:\\Users\\felix\\Documents\\Machine_Learning_Research\\paper_research\\ablation_plot.png",
+    "copy": "D:\\Project\\tmrl\\output\\icodit_2026\\source\\ablation_plot.png",
+    "sha256": "a18f01c3fd9b15925aab7e1871b656583e822e16718b25ce7dec299eb86a261b",
+    "bytes": 509539
+  },
+  {
+    "source": "C:\\Users\\felix\\Documents\\Machine_Learning_Research\\paper_research\\results_plot.png",
+    "copy": "D:\\Project\\tmrl\\output\\icodit_2026\\source\\results_plot.png",
+    "sha256": "9f51dabbd1393e534eb687413268658523d3d303b1db0434790a3914fe925607",
+    "bytes": 490189
+  }
+]

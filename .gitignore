@@ -129,14 +129,32 @@ dmypy.json
 *.idea
 
 # Runtime, checkpoints, datasets, and experiment artifacts
+*.pt
+*.pth
+*.safetensors
+*.npz
+*.npy
+*.pkl
+*.zip
+*.aux
+*.fls
+*.fdb_latexmk
+wandb/
+
 data/
 demo_data/
 experiments/
 weights/
-output/
 tmp/
 scratch/
 test_output_brain/
-fault_benchmark_results/
 AI_Current_Track
-complete paper.pdf
+complete paper.pdf
+
+output/adaptation_benchmark/
+output/test_sac_eval/
+output/trackmania_transfer_v1/
+output/dreamer_training/
+output/sensor_adaptation/
+
+

@@ -1,0 +1,193 @@
+{
+  "source": "Per-episode CSV files; rounded to four decimal places at source",
+  "checked_runs": [
+    {
+      "algorithm": "transformer",
+      "seed": 42,
+      "raw_episodes": 150,
+      "selection_rule": "argmax_validation_score",
+      "checkpoint_file_hash_matches": true,
+      "validation_rows": 10
+    },
+    {
+      "algorithm": "reactive",
+      "seed": 42,
+      "raw_episodes": 75,
+      "selection_rule": "argmax_validation_score",
+      "checkpoint_file_hash_matches": true,
+      "validation_rows": 10
+    },
+    {
+      "algorithm": "transformer",
+      "seed": 43,
+      "raw_episodes": 150,
+      "selection_rule": "argmax_validation_score",
+      "checkpoint_file_hash_matches": true,
+      "validation_rows": 10
+    },
+    {
+      "algorithm": "reactive",
+      "seed": 43,
+      "raw_episodes": 75,
+      "selection_rule": "argmax_validation_score",
+      "checkpoint_file_hash_matches": true,
+      "validation_rows": 10
+    },
+    {
+      "algorithm": "transformer",
+      "seed": 44,
+      "raw_episodes": 150,
+      "selection_rule": "argmax_validation_score",
+      "checkpoint_file_hash_matches": true,
+      "validation_rows": 10
+    },
+    {
+      "algorithm": "reactive",
+      "seed": 44,
+      "raw_episodes": 75,
+      "selection_rule": "argmax_validation_score",
+      "checkpoint_file_hash_matches": true,
+      "validation_rows": 10
+    },
+    {
+      "algorithm": "transformer",
+      "seed": 45,
+      "raw_episodes": 150,
+      "selection_rule": "argmax_validation_score",
+      "checkpoint_file_hash_matches": true,
+      "validation_rows": 10
+    },
+    {
+      "algorithm": "reactive",
+      "seed": 45,
+      "raw_episodes": 75,
+      "selection_rule": "argmax_validation_score",
+      "checkpoint_file_hash_matches": true,
+      "validation_rows": 10
+    },
+    {
+      "algorithm": "transformer",
+      "seed": 46,
+      "raw_episodes": 150,
+      "selection_rule": "argmax_validation_score",
+      "checkpoint_file_hash_matches": true,
+      "validation_rows": 10
+    },
+    {
+      "algorithm": "reactive",
+      "seed": 46,
+      "raw_episodes": 75,
+      "selection_rule": "argmax_validation_score",
+      "checkpoint_file_hash_matches": true,
+      "validation_rows": 10
+    },
+    {
+      "algorithm": "transformer",
+      "seed": 47,
+      "raw_episodes": 150,
+      "selection_rule": "argmax_validation_score",
+      "checkpoint_file_hash_matches": true,
+      "validation_rows": 10
+    },
+    {
+      "algorithm": "reactive",
+      "seed": 47,
+      "raw_episodes": 75,
+      "selection_rule": "argmax_validation_score",
+      "checkpoint_file_hash_matches": true,
+      "validation_rows": 10
+    },
+    {
+      "algorithm": "transformer",
+      "seed": 48,
+      "raw_episodes": 150,
+      "selection_rule": "argmax_validation_score",
+      "checkpoint_file_hash_matches": true,
+      "validation_rows": 10
+    },
+    {
+      "algorithm": "reactive",
+      "seed": 48,
+      "raw_episodes": 75,
+      "selection_rule": "argmax_validation_score",
+      "checkpoint_file_hash_matches": true,
+      "validation_rows": 10
+    },
+    {
+      "algorithm": "transformer",
+      "seed": 49,
+      "raw_episodes": 150,
+      "selection_rule": "argmax_validation_score",
+      "checkpoint_file_hash_matches": true,
+      "validation_rows": 10
+    },
+    {
+      "algorithm": "reactive",
+      "seed": 49,
+      "raw_episodes": 75,
+      "selection_rule": "argmax_validation_score",
+      "checkpoint_file_hash_matches": true,
+      "validation_rows": 10
+    }
+  ],
+  "summary": [
+    {
+      "condition": "test_latency",
+      "n_seeds": 8,
+      "episodes_per_seed_mode": 25,
+      "adaptive_mean": 469.16434200000003,
+      "no_history_mean": 530.999265,
+      "reactive_mean": 447.256969,
+      "G_mean_CI95": [
+        -61.834922999999996,
+        -231.32824181250004,
+        141.63814859999994
+      ],
+      "D_mean_CI95": [
+        21.907373000000007,
+        -73.63641757499998,
+        111.19586476249982
+      ],
+      "positive_G_seeds": 2
+    },
+    {
+      "condition": "test_dead",
+      "n_seeds": 8,
+      "episodes_per_seed_mode": 25,
+      "adaptive_mean": 1929.344484,
+      "no_history_mean": 2059.396015,
+      "reactive_mean": 2470.7883795,
+      "G_mean_CI95": [
+        -130.05153099999995,
+        -354.27195099999994,
+        58.87398133749928
+      ],
+      "D_mean_CI95": [
+        -541.4438955,
+        -997.57606215,
+        -200.96087649999993
+      ],
+      "positive_G_seeds": 4
+    },
+    {
+      "condition": "test_sign_flip",
+      "n_seeds": 8,
+      "episodes_per_seed_mode": 25,
+      "adaptive_mean": 1126.280247,
+      "no_history_mean": 1289.7460310000001,
+      "reactive_mean": 1309.038329,
+      "G_mean_CI95": [
+        -163.46578399999999,
+        -303.3805410375,
+        -24.723139787500056
+      ],
+      "D_mean_CI95": [
+        -182.758082,
+        -431.58700289999996,
+        3.784510537499974
+      ],
+      "positive_G_seeds": 3
+    }
+  ],
+  "scope": "Recomputed seed-level summaries and bootstrap intervals; verified paired episode IDs and checkpoint hashes. Did not rerun training or validate experimental implementation."
+}
