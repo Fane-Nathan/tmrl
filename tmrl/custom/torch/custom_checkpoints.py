@@ -63,7 +63,64 @@ def update_memory(run_instance):
         run_instance.memory.batch_size = batch_size
         run_instance.memory.memory_size = memory_size
         logging.info(f"Memory updated with steps:{steps}, batch size:{batch_size}, memory size:{memory_size}.")
+
+    # Trim loaded memory if it exceeds the target memory size to free system RAM
+    if hasattr(run_instance, "memory") and hasattr(run_instance.memory, "data") and len(run_instance.memory.data) > 0:
+        current_len = len(run_instance.memory)
+        to_trim = current_len - int(memory_size)
+        if to_trim > 0:
+            for i in range(len(run_instance.memory.data)):
+                arr = run_instance.memory.data[i]
+                if isinstance(arr, torch.Tensor):
+                    run_instance.memory.data[i] = arr[to_trim:].clone()
+                elif isinstance(arr, np.ndarray):
+                    run_instance.memory.data[i] = arr[to_trim:].copy()
+                else:
+                    run_instance.memory.data[i] = arr[to_trim:]
+            logging.info(f"Trimmed loaded replay buffer from {current_len} down to {len(run_instance.memory)} samples to prevent RAM exhaustion.")
     return run_instance
+
+
+def dump_dreamer_run_instance(run_instance, checkpoint_path):
+    """
+    Safely dumps the TorchDreamer trainer checkpoint.
+    Guarantees replay memory is trimmed to memory_size before serialization
+    to eliminate MemoryError during torch storage pickling.
+    """
+    memory_size = int(cfg.TMRL_CONFIG.get("MEMORY_SIZE", 50000))
+    if hasattr(run_instance, "memory") and hasattr(run_instance.memory, "data") and len(run_instance.memory.data) > 0:
+        current_len = len(run_instance.memory)
+        to_trim = current_len - memory_size
+        if to_trim > 0:
+            for i in range(len(run_instance.memory.data)):
+                arr = run_instance.memory.data[i]
+                if isinstance(arr, torch.Tensor):
+                    run_instance.memory.data[i] = arr[to_trim:].clone()
+                elif isinstance(arr, np.ndarray):
+                    run_instance.memory.data[i] = arr[to_trim:].copy()
+                else:
+                    run_instance.memory.data[i] = arr[to_trim:]
+            logging.info(f"Trimmed replay buffer from {current_len} to {len(run_instance.memory)} samples before checkpointing.")
+
+    try:
+        dump(run_instance, checkpoint_path)
+    except MemoryError:
+        logging.warning("MemoryError during standard dump! Trimming replay buffer to 25,000 samples and retrying...")
+        if hasattr(run_instance, "memory") and hasattr(run_instance.memory, "data") and len(run_instance.memory.data) > 0:
+            to_trim = max(0, len(run_instance.memory) - 25000)
+            for i in range(len(run_instance.memory.data)):
+                arr = run_instance.memory.data[i]
+                if isinstance(arr, torch.Tensor):
+                    run_instance.memory.data[i] = arr[to_trim:].clone()
+                elif isinstance(arr, np.ndarray):
+                    run_instance.memory.data[i] = arr[to_trim:].copy()
+                else:
+                    run_instance.memory.data[i] = arr[to_trim:]
+        dump(run_instance, checkpoint_path)
+
+
+def load_dreamer_run_instance(checkpoint_path):
+    return load(checkpoint_path)
 
 
 def update_run_instance(run_instance, training_cls):
@@ -88,7 +145,7 @@ def update_run_instance(run_instance, training_cls):
     # update training Agent:
     ALG_CONFIG = cfg.TMRL_CONFIG["ALG"]
     ALG_NAME = ALG_CONFIG["ALGORITHM"]
-    assert ALG_NAME in ["SAC", "REDQSAC"], f"{ALG_NAME} is not supported by this checkpoint updater."
+    assert ALG_NAME in ["SAC", "REDQSAC", "DREAMER"], f"{ALG_NAME} is not supported by this checkpoint updater."
 
     if ALG_NAME in ["SAC", "REDQSAC"]:
         lr_actor = ALG_CONFIG["LR_ACTOR"]
@@ -158,6 +215,59 @@ def update_run_instance(run_instance, training_cls):
                 old = run_instance.agent.m
                 run_instance.agent.m = m
                 logging.info(f"M switched to {m} (old: {old}).")
+
+    elif ALG_NAME == "DREAMER":
+        dreamer_cfg = ALG_CONFIG.get("DREAMER", {})
+        warmup_steps = int(dreamer_cfg.get("WARMUP_STEPS", 100))
+        if hasattr(run_instance.agent, "world_model_warmup_steps") and run_instance.agent.world_model_warmup_steps != warmup_steps:
+            old_warmup = run_instance.agent.world_model_warmup_steps
+            run_instance.agent.world_model_warmup_steps = warmup_steps
+            logging.info(f"Dreamer warmup steps updated to {warmup_steps} (old: {old_warmup}).")
+
+        # Migrate legacy checkpoints away from the failure mode where Dreamer's
+        # world-model optimizer rewrote the demonstrated visual driving policy.
+        # The worker also remains foundation-only until that gate is explicitly
+        # disabled after closed-loop evaluation.
+        agent = run_instance.agent
+        if hasattr(agent, "configure_foundation_safety"):
+            agent.foundation_weights_path = ALG_CONFIG.get(
+                "FOUNDATION_WEIGHTS_PATH",
+                "weights/car_brain_1m_curriculum/car_brain_multimodal.pt",
+            )
+            agent.lr_foundation = float(dreamer_cfg.get("LR_FOUNDATION", 0.0))
+            agent.reload_foundation_on_actor_load = bool(
+                dreamer_cfg.get("RELOAD_FOUNDATION_ON_ACTOR_LOAD", True)
+            )
+            freeze_foundation = bool(
+                dreamer_cfg.get("FREEZE_FOUNDATION", True)
+            )
+            foundation_only = bool(dreamer_cfg.get("FOUNDATION_ONLY", True))
+            foundation_discrete_actions = bool(
+                dreamer_cfg.get("FOUNDATION_DISCRETE_ACTIONS", False)
+            )
+            foundation_steer_threshold = float(
+                dreamer_cfg.get("FOUNDATION_STEER_THRESHOLD", 0.05)
+            )
+            residual_scale = float(dreamer_cfg.get("RESIDUAL_SCALE", 0.25))
+            agent.configure_foundation_safety(
+                freeze_foundation=freeze_foundation,
+                foundation_only=foundation_only,
+                foundation_discrete_actions=foundation_discrete_actions,
+                foundation_steer_threshold=foundation_steer_threshold,
+                residual_scale=residual_scale,
+                reload_weights=True,
+            )
+            logging.info(
+                "Dreamer foundation safety applied: frozen=%s, "
+                "foundation_only=%s, discrete_actions=%s, "
+                "steer_threshold=%s, residual_scale=%s, source=%s.",
+                freeze_foundation,
+                foundation_only,
+                foundation_discrete_actions,
+                foundation_steer_threshold,
+                residual_scale,
+                agent.foundation_weights_path,
+            )
 
     epochs = cfg.TMRL_CONFIG["MAX_EPOCHS"]
     rounds = cfg.TMRL_CONFIG["ROUNDS_PER_EPOCH"]

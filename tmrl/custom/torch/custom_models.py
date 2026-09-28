@@ -257,6 +257,9 @@ class VanillaCNN(nn.Module):
         else:
             speed, gear, rpm, images, act1, act2 = x
 
+        if images.dtype == torch.uint8:
+            images = images.float() / 255.0
+
         x = F.relu(self.conv1(images))
         x = F.relu(self.conv2(x))
         x = F.relu(self.conv3(x))
@@ -281,9 +284,19 @@ class SquashedGaussianVanillaCNNActor(TorchActorModule):
         self.mu_layer = nn.Linear(256, dim_act)
         self.log_std_layer = nn.Linear(256, dim_act)
         self.act_limit = act_limit
+        self.feature_dim = 256
 
-    def forward(self, obs, test=False, with_logprob=True):
-        net_out = self.net(obs)
+    def encode_observation(self, obs):
+        """Encode a real observation into the deployed policy feature space."""
+        return self.net(obs)
+
+    def forward_from_features(self, net_out, test=False, with_logprob=True):
+        """Apply the deployed action head to real or grounded imagined features."""
+        if net_out.shape[-1] != self.feature_dim:
+            raise ValueError(
+                f"Expected actor features of width {self.feature_dim}, got {net_out.shape[-1]}"
+            )
+
         mu = self.mu_layer(net_out)
         log_std = self.log_std_layer(net_out)
         log_std = torch.clamp(log_std, LOG_STD_MIN, LOG_STD_MAX)
@@ -311,6 +324,10 @@ class SquashedGaussianVanillaCNNActor(TorchActorModule):
         # pi_action = pi_action.squeeze()
 
         return pi_action, logp_pi
+
+    def forward(self, obs, test=False, with_logprob=True):
+        net_out = self.encode_observation(obs)
+        return self.forward_from_features(net_out, test=test, with_logprob=with_logprob)
 
     def act(self, obs, test=False):
         with torch.no_grad():
@@ -386,11 +403,14 @@ def remove_colors(images):
 
 
 class SquashedGaussianVanillaColorCNNActor(SquashedGaussianVanillaCNNActor):
-    def forward(self, obs, test=False, with_logprob=True):
+    def encode_observation(self, obs):
         speed, gear, rpm, images, act1, act2 = obs
         images = remove_colors(images)
-        obs = (speed, gear, rpm, images, act1, act2)
-        return super().forward(obs, test=False, with_logprob=True)
+        return super().encode_observation((speed, gear, rpm, images, act1, act2))
+
+    def forward(self, obs, test=False, with_logprob=True):
+        net_out = self.encode_observation(obs)
+        return self.forward_from_features(net_out, test=test, with_logprob=with_logprob)
 
 
 class VanillaColorCNNQFunction(VanillaCNNQFunction):

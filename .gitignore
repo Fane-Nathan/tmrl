@@ -127,3 +127,16 @@ venv.bak/
 dmypy.json
 
 *.idea
+
+# Runtime, checkpoints, datasets, and experiment artifacts
+data/
+demo_data/
+experiments/
+weights/
+output/
+tmp/
+scratch/
+test_output_brain/
+fault_benchmark_results/
+AI_Current_Track
+complete paper.pdf

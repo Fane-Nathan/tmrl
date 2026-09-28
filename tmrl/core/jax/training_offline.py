@@ -73,7 +73,8 @@ class NNXTrainingOffline(TrainingOffline):
                  start_training: int = 0,
                  device: str = None,
                  jit_sampling: bool = False,
-                 jit_substeps: int = 1):
+                 jit_substeps: int = 1,
+                 jit_training: bool = True):
         """
         Args:
             env_cls (type): class of a dummy environment, used only to retrieve observation and action spaces if needed. Alternatively, this can be a tuple of the form (observation_space, action_space).
@@ -92,7 +93,10 @@ class NNXTrainingOffline(TrainingOffline):
             device (str): device to use (None for automatic)
             jit_sampling (bool): whether to jit the sampling method from memory_cls with nnx.jit
             jit_substeps (int): when jit_sampling is true, sampling + training steps are clubbed into jitted blocks of jit_substeps iterations to alleviate python-XLA transfer bottlenecks
+            jit_training (bool): whether to wrap the complete agent.train call in nnx.jit. Set False for agents that dispatch between separately jitted phases on the host.
         """
+        if jit_sampling and not jit_training:
+            raise ValueError("jit_sampling requires jit_training=True")
         if jit_sampling:
             # When jit_sampling is true, every "training step" contains jit_substeps actual training step.
             # Therefore, the following values must be adapted to remain consistent:
@@ -116,6 +120,12 @@ class NNXTrainingOffline(TrainingOffline):
                          device)
         self.jit_sampling = jit_sampling
         self.jit_substeps = jit_substeps
+        self.jit_training = jit_training
+
+    def _train_batch(self, batch):
+        if self.jit_training:
+            return _train_jit(batch, self.agent)
+        return self.agent.train(batch)
         
     def run_epoch(self, interface):
         stats = []
@@ -136,7 +146,7 @@ class NNXTrainingOffline(TrainingOffline):
                 batch = self.memory.sample()
 
                 t_compile_start = time.perf_counter()
-                out = _train_jit(batch, self.agent)
+                out = self._train_batch(batch)
                 t_compile_end = time.perf_counter()
 
             else:  # both method are jit-able
@@ -160,7 +170,7 @@ class NNXTrainingOffline(TrainingOffline):
                     if not self.jit_sampling:
                         batch = self.memory.sample()
                         with jax.profiler.TraceAnnotation("train"):
-                            out = _train_jit(batch, self.agent)
+                            out = self._train_batch(batch)
                     else:
                         with jax.profiler.TraceAnnotation("sample_and_train"):
                             out = _sample_and_train_jit(self.memory, self.agent, self.jit_substeps)
@@ -211,7 +221,7 @@ class NNXTrainingOffline(TrainingOffline):
                 if not self.jit_sampling:  # sampling method not jit-able
                     batch = self.memory.sample()
                     t_sample = time.perf_counter()
-                    stats_training_dict = _train_jit(batch, self.agent)
+                    stats_training_dict = self._train_batch(batch)
                     t_train = time.perf_counter()
                     sampling_duration += t_sample - t_update_buffer
                     training_step_duration += t_train - t_sample

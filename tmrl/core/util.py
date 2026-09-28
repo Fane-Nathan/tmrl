@@ -167,6 +167,7 @@ def git_info(path=None):
 def dump(obj, path):
     path = Path(path)
     tmp_path = path.with_suffix('.tmp')
+    tmp_path.parent.mkdir(parents=True, exist_ok=True)
     with DelayInterrupt():  # Continue to save even if SIGINT or SIGTERM is sent and raise KeyboardInterrupt afterwards.
         with open(tmp_path, 'wb') as f:
             pickle.dump(obj, f, pickle.HIGHEST_PROTOCOL)  # dump temporary file (can fail)
@@ -181,6 +182,7 @@ def load(path):
 def cloudpickle_dump(obj, path):
     path = Path(path)
     tmp_path = path.with_suffix('.tmp')
+    tmp_path.parent.mkdir(parents=True, exist_ok=True)
     with DelayInterrupt():  # Continue to save even if SIGINT or SIGTERM is sent and raise KeyboardInterrupt afterwards.
         with open(tmp_path, 'wb') as f:
             cloudpickle.dump(obj, f)  # dump temporary file (can fail)
@@ -193,6 +195,8 @@ def cloudpickle_load(path):
 
 
 def save_json(d, path):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, 'w', encoding='utf-8') as f:
         json.dump(d, f, ensure_ascii=False, indent=2)
 

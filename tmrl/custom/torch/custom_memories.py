@@ -1,12 +1,22 @@
+import logging
 import random
 import time
 from typing import List, Tuple
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 
 from tmrl.core.memory import BaseMemory, check_samples_crc
 from tmrl.core.torch.memory import TorchMemory
+from tmrl.custom.torch.poincare_memory import (
+    REPLAY_SAMPLER_DEFAULTS,
+    greedy_diverse_subset,
+    mean_off_diagonal,
+    pairwise_euclidean_distance,
+    pairwise_poincare_distance,
+    poincare_expmap0,
+)
 
 
 # LOCAL BUFFER COMPRESSION ==============================
@@ -1344,6 +1354,576 @@ class ArrayTorchMemoryTMFull(BaseMemory):
 
     def get_benchmarks_names(self):
         return "index", "load_acts", "load_imgs", "fix_histories", "pin_memory", "move_to_device", "assemble"
+
+
+class ArrayTorchMemoryTMFullSequence(ArrayTorchMemoryTMFull):
+    """Episode-safe contiguous sequence sampler for recurrent world models.
+
+    The underlying storage remains identical to :class:`ArrayTorchMemoryTMFull`,
+    so existing replay checkpoints can be reused when switching algorithms.
+    Returned tensors have leading dimensions ``[batch, time, ...]`` and an
+    additional ``is_first`` mask marks the truncated recurrent start of each
+    sampled sequence.
+    """
+
+    _REPLAY_MODE_CODES = {"uniform": 0.0, "euclidean": 1.0, "poincare": 2.0}
+
+    def __init__(
+        self,
+        sequence_length=16,
+        replay_sampler="uniform",
+        replay_candidate_count=128,
+        replay_uniform_fraction=0.25,
+        replay_embedding_dim=16,
+        replay_curvature=1.0,
+        replay_tangent_scale=0.75,
+        replay_max_radius=0.95,
+        replay_seed=0,
+        **kwargs,
+    ):
+        self.sequence_length = int(sequence_length)
+        if self.sequence_length < 2:
+            raise ValueError("sequence_length must be at least 2")
+        super().__init__(**kwargs)
+
+        self._replay_projection = None
+        self._replay_projection_shape = None
+        self._replay_sampler_calls = 0
+        self._replay_distance_total = 0.0
+        self._replay_radius_total = 0.0
+        self._replay_candidate_total = 0.0
+        self.configure_replay_sampler(
+            replay_sampler=replay_sampler,
+            replay_candidate_count=replay_candidate_count,
+            replay_uniform_fraction=replay_uniform_fraction,
+            replay_embedding_dim=replay_embedding_dim,
+            replay_curvature=replay_curvature,
+            replay_tangent_scale=replay_tangent_scale,
+            replay_max_radius=replay_max_radius,
+            replay_seed=replay_seed,
+        )
+
+    @staticmethod
+    def _normalize_replay_sampler(mode):
+        mode = str(mode).strip().lower()
+        if mode in {"hyperbolic", "poincaré"}:
+            mode = "poincare"
+        if mode not in {"uniform", "euclidean", "poincare"}:
+            raise ValueError(
+                "replay_sampler must be 'uniform', 'euclidean', or 'poincare'"
+            )
+        return mode
+
+    def configure_replay_sampler(
+        self,
+        replay_sampler="uniform",
+        replay_candidate_count=128,
+        replay_uniform_fraction=0.25,
+        replay_embedding_dim=16,
+        replay_curvature=1.0,
+        replay_tangent_scale=0.75,
+        replay_max_radius=0.95,
+        replay_seed=0,
+    ):
+        """Configure the detached sequence-selection index.
+
+        Returns ``True`` when the effective configuration changed.  This is
+        intentionally separate from replay storage so checkpoint migration can
+        apply new sampling settings without rewriting stored transitions.
+        """
+        mode = self._normalize_replay_sampler(replay_sampler)
+        candidate_count = int(replay_candidate_count)
+        uniform_fraction = float(replay_uniform_fraction)
+        embedding_dim = int(replay_embedding_dim)
+        curvature = float(replay_curvature)
+        tangent_scale = float(replay_tangent_scale)
+        max_radius = float(replay_max_radius)
+        seed = int(replay_seed)
+
+        if candidate_count < 1:
+            raise ValueError("replay_candidate_count must be positive")
+        if not np.isfinite(uniform_fraction) or not 0.0 <= uniform_fraction <= 1.0:
+            raise ValueError("replay_uniform_fraction must be between 0 and 1")
+        if embedding_dim < 2:
+            raise ValueError("replay_embedding_dim must be at least 2")
+        if not np.isfinite(curvature) or curvature <= 0.0:
+            raise ValueError("replay_curvature must be finite and positive")
+        if not np.isfinite(tangent_scale) or tangent_scale <= 0.0:
+            raise ValueError("replay_tangent_scale must be finite and positive")
+        if not np.isfinite(max_radius) or not 0.0 < max_radius < 1.0:
+            raise ValueError("replay_max_radius must be between 0 and 1")
+
+        configuration = (
+            mode,
+            candidate_count,
+            uniform_fraction,
+            embedding_dim,
+            curvature,
+            tangent_scale,
+            max_radius,
+            seed,
+        )
+        previous = tuple(
+            getattr(self, name, None)
+            for name in (
+                "replay_sampler",
+                "replay_candidate_count",
+                "replay_uniform_fraction",
+                "replay_embedding_dim",
+                "replay_curvature",
+                "replay_tangent_scale",
+                "replay_max_radius",
+                "replay_seed",
+            )
+        )
+        projection_changed = (
+            getattr(self, "replay_embedding_dim", None) != embedding_dim
+            or getattr(self, "replay_seed", None) != seed
+        )
+
+        (
+            self.replay_sampler,
+            self.replay_candidate_count,
+            self.replay_uniform_fraction,
+            self.replay_embedding_dim,
+            self.replay_curvature,
+            self.replay_tangent_scale,
+            self.replay_max_radius,
+            self.replay_seed,
+        ) = configuration
+
+        if projection_changed or not hasattr(self, "_replay_projection"):
+            self._replay_projection = None
+            self._replay_projection_shape = None
+        for name, initial in (
+            ("_replay_sampler_calls", 0),
+            ("_replay_distance_total", 0.0),
+            ("_replay_radius_total", 0.0),
+            ("_replay_candidate_total", 0.0),
+        ):
+            if not hasattr(self, name):
+                setattr(self, name, initial)
+
+        changed = previous != configuration
+        if changed:
+            logging.info(
+                "Dreamer replay sampler configured: mode=%s, candidates=%d, "
+                "uniform_fraction=%.2f, embed_dim=%d, curvature=%.3f.",
+                mode,
+                candidate_count,
+                uniform_fraction,
+                embedding_dim,
+                curvature,
+            )
+        return changed
+
+    def _ensure_replay_sampler_state(self):
+        """Supply defaults when loading a checkpoint created before this index."""
+        missing_configuration = any(
+            not hasattr(self, name)
+            for name in (
+                "replay_sampler",
+                "replay_candidate_count",
+                "replay_uniform_fraction",
+                "replay_embedding_dim",
+                "replay_curvature",
+                "replay_tangent_scale",
+                "replay_max_radius",
+                "replay_seed",
+            )
+        )
+        if missing_configuration:
+            configuration = {
+                name: getattr(self, name, default)
+                for name, default in REPLAY_SAMPLER_DEFAULTS.items()
+            }
+            self.configure_replay_sampler(**configuration)
+            return
+
+        if not hasattr(self, "_replay_projection"):
+            self._replay_projection = None
+            self._replay_projection_shape = None
+        for name, initial in (
+            ("_replay_sampler_calls", 0),
+            ("_replay_distance_total", 0.0),
+            ("_replay_radius_total", 0.0),
+            ("_replay_candidate_total", 0.0),
+        ):
+            if not hasattr(self, name):
+                setattr(self, name, initial)
+
+    def _sample_episode_safe_starts(self, count):
+        max_start_exclusive = len(self) - self.sequence_length + 1
+        if max_start_exclusive <= 0:
+            raise RuntimeError(
+                f"Replay needs at least {self.sequence_length + self.min_samples} "
+                "samples before sequence training."
+            )
+
+        count = int(count)
+        replace = max_start_exclusive < count or self.replace
+        starts = self.rng.choice(
+            a=max_start_exclusive,
+            size=count,
+            replace=replace,
+            shuffle=self.shuffle,
+        )
+        offsets = self.min_samples - 1 + np.arange(self.sequence_length)
+
+        # eoe at idx_last means this transition would jump from a terminal
+        # sample to the next episode. A terminal idx_now is allowed only at the
+        # final transition because it appears as idx_last on the following step.
+        invalid = self.data[4][starts[:, np.newaxis] + offsets].any(axis=1)
+        attempts = 0
+        while np.any(invalid):
+            count_invalid = int(invalid.sum())
+            starts[invalid] = self.rng.choice(
+                a=max_start_exclusive,
+                size=count_invalid,
+                replace=True,
+                shuffle=self.shuffle,
+            )
+            invalid = self.data[4][starts[:, np.newaxis] + offsets].any(axis=1)
+            attempts += 1
+            if attempts >= 1000:
+                raise RuntimeError(
+                    "Could not find enough episode-safe replay sequences; "
+                    "reduce DREAMER.SEQUENCE_LENGTH or collect longer episodes."
+                )
+        return np.asarray(starts, dtype=np.int64)
+
+    @staticmethod
+    def _series_summary(series):
+        series = series.reshape(series.shape[0], series.shape[1], -1).mean(dim=-1)
+        return torch.stack(
+            (
+                series.mean(dim=1),
+                series.std(dim=1, unbiased=False),
+                series[:, 0],
+                series[:, -1],
+                series[:, -1] - series[:, 0],
+                series.amin(dim=1),
+                series.amax(dim=1),
+            ),
+            dim=1,
+        )
+
+    def _sequence_descriptors(self, starts):
+        """Build cheap, detached descriptors for candidate replay sequences."""
+        starts = np.asarray(starts, dtype=np.int64)
+        sequence_indices = starts[:, np.newaxis] + self.min_samples + np.arange(
+            self.sequence_length
+        )
+        sequence_indices = torch.as_tensor(sequence_indices, dtype=torch.long)
+        candidate_count = len(starts)
+
+        actions = self.data[1][sequence_indices].detach().float().cpu()
+        actions = actions.reshape(candidate_count, self.sequence_length, -1)
+        action_summary = torch.cat(
+            (
+                actions.mean(dim=1),
+                actions.std(dim=1, unbiased=False),
+                actions[:, 0],
+                actions[:, -1],
+                actions[:, -1] - actions[:, 0],
+            ),
+            dim=1,
+        )
+        speed = self.data[2][sequence_indices].detach().float().cpu() / 300.0
+        gear = self.data[7][sequence_indices].detach().float().cpu() / 6.0
+        rpm = self.data[8][sequence_indices].detach().float().cpu() / 10000.0
+        reward = self.data[5][sequence_indices].detach().float().cpu()
+        reward = torch.sign(reward) * torch.log1p(reward.abs())
+
+        center_indices = sequence_indices[:, self.sequence_length // 2]
+        images = self.data[3][center_indices].detach().float().cpu() / 256.0
+        if images.ndim == 2:
+            images = images.reshape(candidate_count, 1, 1, -1)
+        elif images.ndim == 3:
+            images = images.unsqueeze(1)
+        else:
+            images = images.reshape(
+                candidate_count, -1, images.shape[-2], images.shape[-1]
+            ).mean(dim=1, keepdim=True)
+        coarse_image = F.adaptive_avg_pool2d(images, (2, 2)).flatten(start_dim=1)
+        image_std = images.flatten(start_dim=1).std(dim=1, unbiased=False).unsqueeze(1)
+
+        descriptor = torch.cat(
+            (
+                action_summary,
+                self._series_summary(speed),
+                self._series_summary(gear),
+                self._series_summary(rpm),
+                self._series_summary(reward),
+                coarse_image,
+                image_std,
+            ),
+            dim=1,
+        )
+        return descriptor.numpy().astype(np.float32, copy=False)
+
+    def _project_replay_descriptors(self, descriptors):
+        descriptors = np.asarray(descriptors, dtype=np.float32)
+        center = descriptors.mean(axis=0, keepdims=True)
+        scale = descriptors.std(axis=0, keepdims=True)
+        standardized = np.clip(
+            (descriptors - center) / np.maximum(scale, 1e-5), -6.0, 6.0
+        )
+
+        projection_shape = (standardized.shape[1], self.replay_embedding_dim)
+        if (
+            self._replay_projection is None
+            or self._replay_projection_shape != projection_shape
+        ):
+            projection_seed = (
+                self.replay_seed
+                + 1009 * projection_shape[0]
+                + 9176 * projection_shape[1]
+            ) % (2**32)
+            projection_rng = np.random.default_rng(projection_seed)
+            self._replay_projection = projection_rng.normal(
+                0.0,
+                1.0 / np.sqrt(projection_shape[0]),
+                size=projection_shape,
+            ).astype(np.float32)
+            self._replay_projection_shape = projection_shape
+
+        tangent = standardized @ self._replay_projection
+        tangent *= self.replay_tangent_scale / np.sqrt(self.replay_embedding_dim)
+        return tangent.astype(np.float32, copy=False)
+
+    def _record_replay_metrics(self, candidate_count, distance, radius):
+        self._replay_sampler_calls += 1
+        self._replay_candidate_total += float(candidate_count)
+        self._replay_distance_total += float(distance)
+        self._replay_radius_total += float(radius)
+
+    def _sample_diverse_sequence_starts(self):
+        candidates = self._sample_episode_safe_starts(
+            max(self.batch_size, self.replay_candidate_count)
+        )
+        _, first_positions = np.unique(candidates, return_index=True)
+        unique_starts = candidates[np.sort(first_positions)]
+        descriptors = self._sequence_descriptors(unique_starts)
+        tangent = self._project_replay_descriptors(descriptors)
+
+        if self.replay_sampler == "poincare":
+            points = poincare_expmap0(
+                tangent,
+                curvature=self.replay_curvature,
+                max_radius=self.replay_max_radius,
+            )
+            distances = pairwise_poincare_distance(
+                points, curvature=self.replay_curvature
+            )
+            radii = np.sqrt(self.replay_curvature) * np.linalg.norm(points, axis=1)
+        else:
+            points = tangent
+            distances = pairwise_euclidean_distance(points)
+            radii = np.linalg.norm(points, axis=1)
+
+        selection_count = min(self.batch_size, len(unique_starts))
+        anchor_count = max(
+            1,
+            int(round(selection_count * self.replay_uniform_fraction)),
+        )
+        selected = greedy_diverse_subset(
+            distances,
+            selection_count,
+            self.rng,
+            initial_count=anchor_count,
+        )
+        starts = unique_starts[selected]
+        if len(starts) < self.batch_size:
+            starts = np.concatenate(
+                (
+                    starts,
+                    self.rng.choice(
+                        candidates,
+                        size=self.batch_size - len(starts),
+                        replace=True,
+                    ),
+                )
+            )
+
+        selected_distances = distances[np.ix_(selected, selected)]
+        self._record_replay_metrics(
+            candidate_count=len(unique_starts),
+            distance=mean_off_diagonal(selected_distances),
+            radius=float(radii[selected].mean()) if len(selected) else 0.0,
+        )
+        return np.asarray(starts, dtype=np.int64)
+
+    def sample_sequence_indices(self):
+        self._ensure_replay_sampler_state()
+        if self.replay_sampler == "uniform":
+            starts = self._sample_episode_safe_starts(self.batch_size)
+            self._record_replay_metrics(
+                candidate_count=len(starts), distance=0.0, radius=0.0
+            )
+            return starts
+        return self._sample_diverse_sequence_starts()
+
+    def get_benchmarks(self):
+        self._ensure_replay_sampler_state()
+        base_benchmarks = tuple(super().get_benchmarks())
+        # The parent has a legacy five-value empty branch despite seven names.
+        if len(base_benchmarks) < 7:
+            base_benchmarks += (0.0,) * (7 - len(base_benchmarks))
+
+        calls = self._replay_sampler_calls
+        if calls:
+            candidate_count = self._replay_candidate_total / calls
+            mean_distance = self._replay_distance_total / calls
+            mean_radius = self._replay_radius_total / calls
+        else:
+            candidate_count = mean_distance = mean_radius = 0.0
+        self._replay_sampler_calls = 0
+        self._replay_candidate_total = 0.0
+        self._replay_distance_total = 0.0
+        self._replay_radius_total = 0.0
+        return (
+            *base_benchmarks,
+            self._REPLAY_MODE_CODES[self.replay_sampler],
+            candidate_count,
+            mean_distance,
+            mean_radius,
+        )
+
+    def get_benchmarks_names(self):
+        return (
+            *super().get_benchmarks_names(),
+            "replay_sampler_code",
+            "replay_candidate_count",
+            "replay_mean_distance",
+            "replay_mean_radius",
+        )
+
+    def sample(self):
+        if self.crc_debug:
+            raise RuntimeError("CRC debug is not implemented for sequence sampling")
+        if self.sample_preprocessor is not None:
+            raise RuntimeError("Sample preprocessor support is not implemented for sequences")
+
+        with torch.no_grad():
+            t0 = time.perf_counter()
+            starts = self.sample_sequence_indices()
+            batch_size = len(starts)
+            time_offsets = np.arange(self.sequence_length)
+            indices = (starts[:, np.newaxis] + time_offsets).reshape(-1)
+            idx_last = indices + self.min_samples - 1
+            idx_now = indices + self.min_samples
+            t1 = time.perf_counter()
+
+            acts = self.load_batch_acts(indices)
+            last_act_buf = acts[:, :-1]
+            new_act_buf = acts[:, 1:]
+            t2 = time.perf_counter()
+
+            imgs = self.load_batch_imgs(indices)
+            imgs_last_obs = imgs[:, :-1]
+            imgs_new_obs = imgs[:, 1:]
+            t3 = time.perf_counter()
+
+            eoes = self.load_batch_eoes(indices)
+            eoes_prev_acts = eoes[:, -self.act_buf_len - 1:-1]
+            eoes_new_acts = eoes[:, -self.act_buf_len:]
+            eoes_prev_imgs = eoes[:, -self.imgs_obs - 1:-1]
+            eoes_new_imgs = eoes[:, -self.imgs_obs:]
+            fix_batch_history_around_eoes_numpy(last_act_buf, eoes_prev_acts)
+            fix_batch_history_around_eoes_numpy(new_act_buf, eoes_new_acts)
+            fix_batch_history_around_eoes_numpy(imgs_last_obs, eoes_prev_imgs)
+            fix_batch_history_around_eoes_numpy(imgs_new_obs, eoes_new_imgs)
+            t4 = time.perf_counter()
+
+            if str(self.device).startswith("cuda"):
+                last_act_buf = last_act_buf.pin_memory()
+                new_act_buf = new_act_buf.pin_memory()
+                imgs_last_obs = imgs_last_obs.pin_memory()
+                imgs_new_obs = imgs_new_obs.pin_memory()
+            t5 = time.perf_counter()
+
+            fields = (
+                self.data[2][idx_last],
+                self.data[7][idx_last],
+                self.data[8][idx_last],
+                imgs_last_obs,
+                self.data[1][idx_now],
+                self.data[5][idx_now],
+                self.data[2][idx_now],
+                self.data[7][idx_now],
+                self.data[8][idx_now],
+                imgs_new_obs,
+                self.data[9][idx_now],
+                self.data[10][idx_now],
+            )
+            fields = tuple(
+                field.to(self.device, non_blocking=True) for field in fields
+            )
+            last_act_buf = last_act_buf.to(self.device, non_blocking=True)
+            new_act_buf = new_act_buf.to(self.device, non_blocking=True)
+            t6 = time.perf_counter()
+
+            def sequence(tensor):
+                return tensor.reshape(
+                    batch_size, self.sequence_length, *tensor.shape[1:]
+                )
+
+            (
+                speed,
+                gear,
+                rpm,
+                images,
+                action,
+                reward,
+                next_speed,
+                next_gear,
+                next_rpm,
+                next_images,
+                terminated,
+                truncated,
+            ) = (sequence(field) for field in fields)
+            last_actions = tuple(
+                sequence(last_act_buf[:, j]) for j in range(self.act_buf_len)
+            )
+            next_actions = tuple(
+                sequence(new_act_buf[:, j]) for j in range(self.act_buf_len)
+            )
+            obs = (speed, gear, rpm, images, *last_actions)
+            next_obs = (
+                next_speed,
+                next_gear,
+                next_rpm,
+                next_images,
+                *next_actions,
+            )
+            is_first = torch.zeros(
+                batch_size,
+                self.sequence_length,
+                device=self.device,
+                dtype=torch.bool,
+            )
+            is_first[:, 0] = True
+            t7 = time.perf_counter()
+
+            self.nb_iterations += 1
+            self.index_time += t1 - t0
+            self.load_acts_time += t2 - t1
+            self.load_imgs_time += t3 - t2
+            self.fix_histories_time += t4 - t3
+            self.pin_memory_time += t5 - t4
+            self.move_to_device_time += t6 - t5
+            self.assemble_time += t7 - t6
+
+            return (
+                obs,
+                action,
+                reward,
+                next_obs,
+                terminated,
+                truncated,
+                is_first,
+            )
 
 
 # JIT torch memories ===================================================================================================

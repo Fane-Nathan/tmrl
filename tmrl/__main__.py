@@ -1,9 +1,27 @@
 import json
 import logging
+import sys
 import time
 from argparse import ArgumentParser, ArgumentTypeError
 
+from tmrl.tools.init_package.init_tmrl import TMRL_FOLDER as _TMRL_FOLDER
 import tmrl.config.config_constants as cfg
+
+# Desktop Duplication must be created before importing the torch-dependent
+# configuration graph on hybrid-GPU Windows systems.
+_CAPTURE_COMMANDS = {
+    "--worker",
+    "--expert",
+    "--test",
+    "--benchmark",
+    "--check-environment",
+    "--record-reward",
+}
+if any(argument in _CAPTURE_COMMANDS for argument in sys.argv[1:]):
+    from tmrl.custom.tm.utils.window import preinitialize_dxcam_capture
+
+    preinitialize_dxcam_capture()
+
 import tmrl.config.config_objects as cfg_obj
 
 from tmrl.core.envs import GenericGymEnv
@@ -24,17 +42,26 @@ def main(args):
         config_modifiers = args.config
         for k, v in config_modifiers.items():
             config[k] = v
+        worker_device = (
+            str(cfg_obj.FOUNDATION_CONFIG.get("WORKER_DEVICE", "cpu"))
+            if cfg_obj.IS_JAX_DREAMER
+            else "cuda"
+            if cfg.CUDA_INFERENCE
+            else "cpu"
+        )
         rw = RolloutWorker(env_cls=partial(GenericGymEnv, id=cfg.RTGYM_VERSION, gym_kwargs={"config": config}),
                            actor_module_cls=cfg_obj.POLICY,
                            sample_compressor=cfg_obj.SAMPLE_COMPRESSOR,
-                           device='cuda' if cfg.CUDA_INFERENCE else 'cpu',
+                           device=worker_device,
                            server_ip=cfg.SERVER_IP_FOR_WORKER,
                            max_samples_per_episode=cfg.RW_MAX_SAMPLES_PER_EPISODE,
                            model_path=cfg.MODEL_PATH_WORKER,
                            obs_preprocessor=cfg_obj.OBS_PREPROCESSOR,
                            crc_debug=cfg.CRC_DEBUG,
                            standalone=args.test)
-        if args.worker:
+        if args.test:
+            rw.run_episodes(10000)
+        elif args.worker:
             rw.run()
         elif args.expert:
             rw.run(expert=True)
@@ -51,6 +78,44 @@ def main(args):
                           load_run_instance_fn=cfg_obj.LOAD_RUN_INSTANCE_FN,
                           updater_fn=cfg_obj.UPDATER_FN)
         logging.info(f"--- NOW RUNNING {cfg_obj.ALG_NAME} on TrackMania ---")
+        if cfg_obj.IS_JAX_DREAMER:
+            dreamer = cfg_obj.CONTINUAL_DREAMER_CONFIG
+            logging.info(
+                "M1 JAX Dreamer foundation is enabled: replay sequences=%s, "
+                "batch=%s, warm-up=%s, imagination horizon=%s. Dynamic experts, "
+                "protected replay, consolidation, and AZR remain disabled.",
+                dreamer.get("SEQUENCE_LENGTH", 16),
+                dreamer.get("BATCH_SIZE", 8),
+                dreamer.get("WARMUP_STEPS", 2000),
+                dreamer.get("HORIZON", 8),
+            )
+        elif cfg_obj.ALG_NAME == "DREAMER":
+            dreamer = cfg_obj.DREAMER_CONFIG
+            logging.info(
+                "Recurrent Dreamer control is enabled: replay sequences=%s, "
+                "batch=%s, warm-up=%s, imagination horizon=%s. The broadcast "
+                "actor contains the encoder, RSSM filter, and latent policy.",
+                dreamer.get("SEQUENCE_LENGTH", 16),
+                dreamer.get("BATCH_SIZE", 8),
+                dreamer.get("WARMUP_STEPS", 2000),
+                dreamer.get("HORIZON", 8),
+            )
+            if cfg_obj.USE_AZR_IMAGINATION:
+                logging.info(
+                    "AZR latent tasks are connected as prioritized Dreamer "
+                    "imagination start states (attempts=%s, proposal interval=%s).",
+                    cfg_obj.AZR_CONFIG.get("SOLVER_ATTEMPTS", 4),
+                    cfg_obj.AZR_CONFIG.get("PROPOSAL_INTERVAL", 8),
+                )
+        elif cfg_obj.USE_AZR_IMAGINATION:
+            azr = cfg_obj.AZR_CONFIG
+            logging.info(
+                "AZR imagination is enabled: real-replay warm-up=%s, horizon=%s, "
+                "solver attempts=%s. Imagined updates will target the broadcast actor.",
+                azr.get("WARMUP_STEPS", 1000),
+                azr.get("HORIZON", 3),
+                azr.get("SOLVER_ATTEMPTS", 8),
+            )
         if args.wandb:
             trainer.run_with_wandb(entity=cfg.WANDB_ENTITY,
                                    project=cfg.WANDB_PROJECT,

@@ -5,7 +5,7 @@ import socket
 import struct
 import time
 from pathlib import Path
-from threading import Lock, Thread
+from threading import Condition, Event, Thread
 
 # third-party imports
 import cv2
@@ -20,58 +20,89 @@ class TM2020OpenPlanetClient:
         self._struct_str = struct_str
         self.nb_floats = self._struct_str.count('f')
         self.nb_uint64 = self._struct_str.count('Q')
-        self._nb_bytes = self.nb_floats * 4 + self.nb_uint64 * 8
+        self._nb_bytes = struct.calcsize(struct_str)
 
         self._host = host
         self._port = port
 
         # Threading attributes:
-        self.__lock = Lock()
+        self.__condition = Condition()
+        self.__closed = Event()
         self.__data = None
+        self.__received_at = None
+        self.__error = None
         self.__t_client = Thread(target=self.__client_thread, args=(), kwargs={}, daemon=True)
         self.__t_client.start()
 
     def __client_thread(self):
         """
         Thread of the client.
-        This listens for incoming data until the object is destroyed
-        TODO: handle disconnection
+        Drain telemetry continuously; consumers receive the latest full packet.
+        A disconnect must wake consumers, not spin forever on recv(b'').
         """
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.connect((self._host, self._port))
-            data_raw = b''
-            while True:  # main loop
-                while len(data_raw) < self._nb_bytes:
-                    data_raw += s.recv(1024)
-                div = len(data_raw) // self._nb_bytes
-                data_used = data_raw[(div - 1) * self._nb_bytes:div * self._nb_bytes]
-                data_raw = data_raw[div * self._nb_bytes:]
-                self.__lock.acquire()
-                self.__data = data_used
-                self.__lock.release()
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.settimeout(0.5)
+                s.connect((self._host, self._port))
+                data_raw = b''
+                while not self.__closed.is_set():
+                    try:
+                        chunk = s.recv(65536)
+                    except socket.timeout:
+                        continue
+                    if not chunk:
+                        raise ConnectionError("OpenPlanet disconnected")
+                    data_raw += chunk
+                    div = len(data_raw) // self._nb_bytes
+                    if div:
+                        data_used = data_raw[(div - 1) * self._nb_bytes:div * self._nb_bytes]
+                        data_raw = data_raw[div * self._nb_bytes:]
+                        with self.__condition:
+                            self.__data = data_used
+                            self.__received_at = time.monotonic()
+                            self.__condition.notify_all()
+        except Exception as exc:
+            with self.__condition:
+                self.__error = exc
+                self.__condition.notify_all()
+        finally:
+            with self.__condition:
+                self.__condition.notify_all()
 
-    def retrieve_data(self, sleep_if_empty=0.01, timeout=10.0):
+    def retrieve_data(self, sleep_if_empty=0.01, timeout=60.0, max_age=0.5):
         """
         Retrieves the most recently received data
         Use this function to retrieve the most recently received data
         This blocks if nothing has been received so far
         """
-        c = True
-        t_start = None
-        while c:
-            self.__lock.acquire()
-            if self.__data is not None:
-                data = struct.unpack(self._struct_str, self.__data)
-                c = False
-                self.__data = None
-            self.__lock.release()
-            if c:
-                if t_start is None:
-                    t_start = time.time()
-                t_now = time.time()
-                assert t_now - t_start < timeout, f"OpenPlanet stopped sending data since more than {timeout}s."
-                time.sleep(sleep_if_empty)
-        return data
+        # sleep_if_empty is retained for API compatibility; notification replaces
+        # polling. Packet freshness is measured at local receipt, not in-game time.
+        if timeout <= 0 or max_age <= 0:
+            raise ValueError("timeout and max_age must be positive")
+        deadline = time.monotonic() + timeout
+        with self.__condition:
+            while True:
+                if self.__closed.is_set():
+                    raise ConnectionError("OpenPlanet client is closed")
+                if self.__error is not None:
+                    raise ConnectionError("OpenPlanet telemetry connection failed") from self.__error
+                now = time.monotonic()
+                if self.__data is not None:
+                    packet = self.__data
+                    self.__data = None
+                    if now - self.__received_at <= max_age:
+                        return struct.unpack(self._struct_str, packet)
+                remaining = deadline - now
+                if remaining <= 0:
+                    raise TimeoutError(f"No fresh OpenPlanet telemetry within {timeout}s")
+                self.__condition.wait(remaining)
+
+    def close(self):
+        """Stop the socket reader and wake any waiting consumer."""
+        self.__closed.set()
+        with self.__condition:
+            self.__condition.notify_all()
+        self.__t_client.join(timeout=1.0)
 
 
 def save_ghost(host='127.0.0.1', port=10000):

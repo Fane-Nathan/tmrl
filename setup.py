@@ -126,12 +126,14 @@ install_req = [
     'cloudpickle',
     'jax',
     'jaxlib',
-    'flax'
+    'flax',
+    'optax'
 ]
 
 # Dependencies for the TrackMania pipeline
 if platform.system() == "Windows":
     install_req.append('pywin32>=303')
+    install_req.append('dxcam>=0.3.0')
     install_req.append('vgamepad')
 elif platform.system() == "Linux":
     install_req.append('mss')

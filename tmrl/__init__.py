@@ -6,6 +6,17 @@ logging.basicConfig(stream=sys.stdout, level=logging.INFO)
 # fixes for Windows:
 import platform
 if platform.system() == "Windows":
+    import ctypes
+    try:
+        _hw = ctypes.windll.user32.OpenWindowStationW("WinSta0", False, 0x10000000)
+        if _hw:
+            ctypes.windll.user32.SetProcessWindowStation(_hw)
+        _hd = ctypes.windll.user32.OpenDesktopW("Default", 0, False, 0x10000000)
+        if _hd:
+            ctypes.windll.user32.SetThreadDesktop(_hd)
+    except Exception:
+        pass
+
     # fix pywin32 in case it fails to import:
     try:
         import win32gui

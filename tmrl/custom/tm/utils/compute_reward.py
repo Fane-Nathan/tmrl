@@ -36,6 +36,10 @@ class RewardFunction:
             with open(reward_data_path, 'rb') as f:
                 self.data = pickle.load(f)
 
+        self.universal_mode = os.environ.get("TMRL_UNIVERSAL_REWARD", "0") == "1" or not os.path.exists(reward_data_path)
+        self.last_distance = 0.0
+        self.max_stall_steps = int(4.0 * 20)  # 4 seconds without forward progress -> failure
+
         self.cur_idx = 0
         self.nb_obs_forward = nb_obs_forward
         self.nb_obs_backward = nb_obs_backward
@@ -46,16 +50,65 @@ class RewardFunction:
         self.failure_counter = 0
         self.datalen = len(self.data)
 
-        # self.traj = []
+        self.start_pos = None
+        self.highest_displacement = 0.0
+        self.last_pos = None
 
-    def compute_reward(self, pos):
+    def compute_reward(self, pos, speed=None, distance=None):
         """
-        Computes the current reward given the position pos
+        Computes the current reward given the position pos, speed, and distance
         Args:
             pos: the current position
+            speed: the current speed
+            distance: current distance along track (from OpenPlanet telemetry)
         Returns:
             float, bool: the reward and the terminated signal
         """
+        if self.universal_mode:
+            self.step_counter += 1
+            terminated = False
+
+            pos_arr = np.asarray(pos, dtype=np.float32)
+            if self.start_pos is None:
+                self.start_pos = pos_arr.copy()
+                self.highest_displacement = 0.0
+                self.last_pos = pos_arr.copy()
+
+            # Measure progress along the Track B track direction (negative X heading)
+            if abs(self.start_pos[0] - 1424.0) < 50.0 and abs(self.start_pos[2] - 688.0) < 50.0:
+                track_progress = float(self.start_pos[0] - pos_arr[0])
+            else:
+                track_progress = float(np.linalg.norm(pos_arr - self.start_pos))
+            self.last_pos = pos_arr.copy()
+
+            spd = float(speed[0]) if hasattr(speed, '__getitem__') else float(speed or 0.0)
+
+            # Check if advancing to a new highest point along the track
+            if track_progress > self.highest_displacement + 0.20:
+                progress = track_progress - self.highest_displacement
+                self.highest_displacement = track_progress
+                # Positive reward for genuine progress along the track
+                reward = (progress * 0.15) + (max(0.0, spd) * 0.0005)
+                self.failure_counter = 0
+            else:
+                # No new track progress (circling, off-track, or reversing)
+                reward = 0.0
+                self.failure_counter += 1
+
+            # Track boundaries on Track B (Summer 2020 - 01, start [1424, 98, 688]):
+            # Road centerline is Z ~ 688. If car veers into the grass (|Z - 688| > 15m), terminate!
+            if abs(self.start_pos[0] - 1424.0) < 50.0 and abs(self.start_pos[2] - 688.0) < 50.0:
+                if abs(pos_arr[2] - 688.0) > 15.0:
+                    reward = -1.0
+                    terminated = True
+
+            # Anti-circling / stall termination:
+            # If the car fails to make forward progress for 15 steps (0.75s), terminate
+            if self.failure_counter > 15:
+                reward = -0.5
+                terminated = True
+
+            return reward, terminated
         # self.traj.append(pos)
 
         terminated = False
@@ -127,5 +180,9 @@ class RewardFunction:
         self.cur_idx = 0
         self.step_counter = 0
         self.failure_counter = 0
+        self.last_distance = 0.0
+        self.start_pos = None
+        self.highest_displacement = 0.0
+        self.last_pos = None
 
         # self.traj = []

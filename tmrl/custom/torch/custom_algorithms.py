@@ -6,6 +6,7 @@ from dataclasses import dataclass
 # third-party imports
 import numpy as np
 import torch
+import torch.nn.functional as F
 from torch.optim import Adam, AdamW, SGD
 
 # local imports
@@ -485,3 +486,462 @@ class REDQSACAgent(TrainingAgent):
             ret_dict["entropy_coef"] = alpha_t.item()
 
         return ret_dict
+
+
+# Experimental SAC auxiliary world model =================================================
+
+from tmrl.custom.torch.world_model import TorchLatentWorldModel, TorchLatentAdversaryProposer, symlog
+from tmrl.custom.torch.azr import ReplayLatentTaskBuffer, compute_azr_learnability
+
+
+@dataclass(eq=0)
+class DreamSACAgent(SpinupSACAgent):
+    """
+    SAC plus a gated replay-grounded AZR/imagination curriculum.
+
+    Real replay remains the source of truth for SAC and for fitting the world
+    model.  Candidate tasks are bounded perturbations of posterior states from
+    those real observations.  They are kept only when the model predicts
+    adequate continuation support, evaluated by repeated stochastic attempts,
+    and prioritized with the AZR learnability rule.  Imagination updates the
+    same action head returned by :meth:`get_actor`, so successful updates are
+    broadcast to rollout workers rather than remaining in a side policy.
+
+    These are model-space curriculum tasks, not generated TrackMania maps.  The
+    conservative warm-up, short horizon, support screening, age limit, and
+    small loss scale are intentional safeguards against model exploitation.
+    """
+    horizon: int = 3
+    lr_world_model: float = 3e-4
+    lr_adversary: float = 1e-4
+    free_nats: float = 1.0
+    enable_azr_imagination: bool = False
+    enable_latent_adversary: bool = False
+    world_model_warmup_steps: int = 1000
+    solver_attempts: int = 8
+    tasks_per_proposal: int = 8
+    task_batch_size: int = 8
+    task_buffer_capacity: int = 1024
+    task_max_age: int = 2000
+    task_proposal_interval: int = 4
+    imagination_interval: int = 2
+    min_task_continuation: float = 0.5
+    max_latent_perturbation: float = 0.25
+    target_quantile: float = 0.5
+    imagination_actor_scale: float = 0.05
+    imagination_reward_clip: float = 10.0
+    imagination_grad_clip: float = 10.0
+    azr_seed: int = 0
+
+    def __post_init__(self):
+        super().__post_init__()
+        actor = self.model.actor
+        if not hasattr(actor, "encode_observation") or not hasattr(actor, "forward_from_features"):
+            raise TypeError(
+                "DreamSACAgent requires an image actor exposing encode_observation() "
+                "and forward_from_features()."
+            )
+        if self.enable_latent_adversary and not self.enable_azr_imagination:
+            raise ValueError(
+                "enable_latent_adversary is no longer a standalone mode; enable the "
+                "validated AZR_IMAGINATION pipeline instead."
+            )
+        for name in (
+            "horizon",
+            "solver_attempts",
+            "tasks_per_proposal",
+            "task_batch_size",
+            "task_buffer_capacity",
+            "task_max_age",
+            "task_proposal_interval",
+            "imagination_interval",
+        ):
+            if int(getattr(self, name)) < 1:
+                raise ValueError(f"{name} must be positive")
+        if not 0.0 <= self.target_quantile <= 1.0:
+            raise ValueError("target_quantile must be in [0, 1]")
+
+        self.world_model = TorchLatentWorldModel(
+            img_channels=cfg.IMG_HIST_LEN,
+            img_height=cfg.IMG_HEIGHT,
+            img_width=cfg.IMG_WIDTH,
+            latent_dim=128,
+            action_dim=3,
+            hidden_dim=256,
+            policy_feature_dim=actor.feature_dim,
+        ).to(self.device)
+
+        self.adversary = TorchLatentAdversaryProposer(
+            feat_dim=384,
+            perturbation_dim=128,
+            max_magnitude=self.max_latent_perturbation,
+        ).to(self.device)
+
+        self.wm_optimizer = Adam(self.world_model.parameters(), lr=self.lr_world_model)
+        self.adversary_optimizer = Adam(self.adversary.parameters(), lr=self.lr_adversary)
+        self.task_buffer = ReplayLatentTaskBuffer(
+            capacity=self.task_buffer_capacity,
+            max_age=self.task_max_age,
+            seed=self.azr_seed,
+        )
+        self.world_model_updates = 0
+        self.azr_train_steps = 0
+        self._azr_activation_logged = False
+
+    def _empty_azr_metrics(self):
+        return {
+            "azr_ready": 0.0,
+            "azr_warmup_updates": float(self.world_model_updates),
+            "azr_warmup_remaining": float(
+                max(self.world_model_warmup_steps - self.world_model_updates, 0)
+            ),
+            "azr_warmup_fraction": float(
+                min(
+                    self.world_model_updates / max(self.world_model_warmup_steps, 1),
+                    1.0,
+                )
+            ),
+            "azr_tasks_proposed": 0.0,
+            "azr_tasks_accepted": 0.0,
+            "azr_task_buffer_size": float(len(self.task_buffer)),
+            "azr_mean_pass_rate": 0.0,
+            "azr_mean_learnability": 0.0,
+            "azr_mean_survival": 0.0,
+            "loss_adversary": 0.0,
+            "loss_imagination_actor": 0.0,
+            "mean_imagined_return": 0.0,
+            "imagined_policy_updates": 0.0,
+        }
+
+    def _alpha_for_actor(self):
+        if self.learn_entropy_coef:
+            return torch.exp(self.log_alpha.detach())
+        return self.alpha_t.detach()
+
+    def _set_world_model_grad(self, enabled):
+        for parameter in self.world_model.parameters():
+            parameter.requires_grad_(enabled)
+
+    def _posterior_start(self, obs):
+        embed = self.world_model.encoder(obs)
+        batch_size = embed.shape[0]
+        h = torch.zeros(
+            batch_size,
+            self.world_model.hidden_dim,
+            device=embed.device,
+            dtype=embed.dtype,
+        )
+        _, mean, std = self.world_model.rssm.compute_posterior(h, embed)
+        return h, mean, std, self.world_model.get_feature(h, mean)
+
+    def _rollout_tasks(self, h, z, attempts=1):
+        """Roll out exact task states; gradients are controlled by the caller."""
+        task_count = h.shape[0]
+        h = h.unsqueeze(0).expand(attempts, -1, -1).reshape(
+            attempts * task_count, h.shape[-1]
+        )
+        z = z.unsqueeze(0).expand(attempts, -1, -1).reshape(
+            attempts * task_count, z.shape[-1]
+        )
+        cumulative_return = torch.zeros(h.shape[0], device=h.device, dtype=h.dtype)
+        cumulative_log_prob = torch.zeros_like(cumulative_return)
+        survival = torch.ones_like(cumulative_return)
+        discount = 1.0
+
+        for _ in range(self.horizon):
+            feature = self.world_model.get_feature(h, z)
+            policy_feature = self.world_model.predict_policy_feature(feature)
+            action, log_prob = self.model.actor.forward_from_features(policy_feature)
+            h, z, reward, continuation, _ = self.world_model.imagine_step(h, z, action)
+            reward = reward.squeeze(-1).clamp(
+                -self.imagination_reward_clip, self.imagination_reward_clip
+            )
+            continuation = continuation.squeeze(-1).clamp(0.0, 1.0)
+            cumulative_return = cumulative_return + discount * survival * reward
+            cumulative_log_prob = cumulative_log_prob + discount * survival * log_prob
+            survival = survival * continuation
+            discount *= self.gamma
+
+        shape = (attempts, task_count)
+        return (
+            cumulative_return.reshape(shape),
+            survival.reshape(shape),
+            cumulative_log_prob.reshape(shape),
+        )
+
+    @staticmethod
+    def _gaussian_kl(p_mean, p_std, q_mean, q_std):
+        """KL(N(p)||N(q)), reduced over the latent dimension."""
+        p_var = p_std.square()
+        q_var = q_std.square()
+        elem = (
+            torch.log(q_std / (p_std + 1e-6))
+            + (p_var + (p_mean - q_mean).square()) / (2.0 * q_var + 1e-6)
+            - 0.5
+        )
+        return elem.sum(dim=-1)
+
+    def _train_world_model(self, o, a, r, o2, d, truncated):
+        if not isinstance(o, (tuple, list)) or len(o) < 4:
+            raise ValueError("DreamSACAgent world-model training requires image observations")
+
+        embed = self.world_model.encoder(o)
+        next_embed = self.world_model.encoder(o2)
+        batch_size = embed.shape[0]
+
+        h0 = torch.zeros(batch_size, 256, device=embed.device, dtype=embed.dtype)
+        z0, _, _ = self.world_model.rssm.compute_posterior(h0, embed)
+        h1 = self.world_model.rssm.step_deterministic(h0, z0, a)
+        _, prior_mean, prior_std = self.world_model.rssm.compute_prior(h1)
+        z_post, post_mean, post_std = self.world_model.rssm.compute_posterior(h1, next_embed)
+
+        feat0 = self.world_model.get_feature(h0, z0)
+        feat1 = self.world_model.get_feature(h1, z_post)
+        pred_reward = self.world_model.predict_reward(feat1)
+        pred_continue = self.world_model.predict_continuation(feat1)
+
+        pred_embedding0 = self.world_model.predict_embedding(feat0)
+        pred_embedding1 = self.world_model.predict_embedding(feat1)
+        pred_policy_feature0 = self.world_model.predict_policy_feature_symlog(feat0)
+        pred_policy_feature1 = self.world_model.predict_policy_feature_symlog(feat1)
+        with torch.no_grad():
+            policy_feature0 = self.model.actor.encode_observation(o)
+            policy_feature1 = self.model.actor.encode_observation(o2)
+
+        reward_target = r.reshape(batch_size, 1).to(dtype=pred_reward.dtype)
+        done = d.reshape(batch_size, 1).to(dtype=pred_continue.dtype)
+        if truncated is not None:
+            trunc = truncated.reshape(batch_size, 1).to(dtype=pred_continue.dtype)
+            done = torch.maximum(done, trunc)
+        continue_target = 1.0 - done
+
+        loss_reward = F.mse_loss(pred_reward, symlog(reward_target))
+        loss_continue = F.binary_cross_entropy(pred_continue, continue_target)
+        loss_embedding = 0.5 * (
+            F.mse_loss(pred_embedding0, embed.detach())
+            + F.mse_loss(pred_embedding1, next_embed.detach())
+        )
+        loss_policy_feature = 0.5 * (
+            F.smooth_l1_loss(pred_policy_feature0, symlog(policy_feature0.detach()))
+            + F.smooth_l1_loss(pred_policy_feature1, symlog(policy_feature1.detach()))
+        )
+
+        kl_dyn = self._gaussian_kl(
+            post_mean.detach(), post_std.detach(), prior_mean, prior_std
+        )
+        kl_rep = self._gaussian_kl(
+            post_mean, post_std, prior_mean.detach(), prior_std.detach()
+        )
+        free_nats = torch.as_tensor(self.free_nats, device=embed.device, dtype=embed.dtype)
+        loss_kl_dyn = torch.maximum(kl_dyn, free_nats).mean()
+        loss_kl_rep = torch.maximum(kl_rep, free_nats).mean()
+
+        loss_model = (
+            loss_reward
+            + loss_continue
+            + loss_embedding
+            + loss_policy_feature
+            + loss_kl_dyn
+            + 0.1 * loss_kl_rep
+        )
+
+        self.wm_optimizer.zero_grad(set_to_none=True)
+        loss_model.backward()
+        torch.nn.utils.clip_grad_norm_(self.world_model.parameters(), max_norm=100.0)
+        self.wm_optimizer.step()
+        self.world_model_updates += 1
+
+        return {
+            "loss_world_model": loss_model.detach().item(),
+            "loss_wm_reward": loss_reward.detach().item(),
+            "loss_wm_continue": loss_continue.detach().item(),
+            "loss_wm_embedding": loss_embedding.detach().item(),
+            "loss_wm_policy_feature": loss_policy_feature.detach().item(),
+            "loss_wm_kl_dyn": loss_kl_dyn.detach().item(),
+            "loss_wm_kl_rep": loss_kl_rep.detach().item(),
+        }
+
+    def _propose_and_validate_tasks(self, obs):
+        metrics = self._empty_azr_metrics()
+        with torch.no_grad():
+            h, z_mean, z_std, feature = self._posterior_start(obs)
+        task_count = min(self.tasks_per_proposal, h.shape[0])
+        indices = torch.randperm(h.shape[0], device=h.device)[:task_count]
+        h = h[indices]
+        z_mean = z_mean[indices]
+        z_std = z_std[indices]
+        feature = feature[indices].detach()
+
+        perturbation, proposal_log_prob = self.adversary.sample(feature)
+        # The proposal is measured in posterior standard deviations, keeping it
+        # inside a small local support region around a real replay observation.
+        task_z = z_mean + perturbation * z_std
+
+        with torch.no_grad():
+            returns, survival, _ = self._rollout_tasks(
+                h.detach(), task_z.detach(), attempts=self.solver_attempts
+            )
+            target_return = torch.quantile(
+                returns, self.target_quantile, dim=0
+            )
+            successes = (
+                (returns > target_return.unsqueeze(0))
+                & (survival >= self.min_task_continuation)
+            ).float()
+            learnability, pass_rate = compute_azr_learnability(successes)
+            mean_survival = survival.mean(dim=0)
+            finite = (
+                torch.isfinite(returns).all(dim=0)
+                & torch.isfinite(survival).all(dim=0)
+                & torch.isfinite(target_return)
+            )
+            in_support = perturbation.detach().abs().amax(dim=-1) <= (
+                self.max_latent_perturbation + 1e-6
+            )
+            valid = finite & in_support & (mean_survival >= self.min_task_continuation)
+
+        signal = learnability.detach() * valid.float()
+        loss_adversary = torch.zeros((), device=h.device)
+        if signal.sum() > 0.0:
+            loss_adversary = -(signal * proposal_log_prob).sum() / valid.float().sum().clamp_min(1.0)
+            self.adversary_optimizer.zero_grad(set_to_none=True)
+            loss_adversary.backward()
+            torch.nn.utils.clip_grad_norm_(self.adversary.parameters(), max_norm=10.0)
+            self.adversary_optimizer.step()
+
+        accepted = self.task_buffer.add_batch(
+            h=h,
+            z=task_z,
+            target_returns=target_return,
+            priorities=learnability,
+            pass_rates=pass_rate,
+            mean_survival=mean_survival,
+            valid=valid,
+            current_step=self.azr_train_steps,
+        )
+        metrics.update(
+            azr_tasks_proposed=float(task_count),
+            azr_tasks_accepted=float(accepted),
+            azr_task_buffer_size=float(len(self.task_buffer)),
+            azr_mean_pass_rate=pass_rate.mean().item(),
+            azr_mean_learnability=learnability.mean().item(),
+            azr_mean_survival=mean_survival.mean().item(),
+            loss_adversary=loss_adversary.detach().item(),
+        )
+        return metrics
+
+    def _refresh_tasks_and_train_actor(self):
+        metrics = self._empty_azr_metrics()
+        if len(self.task_buffer) == 0:
+            return metrics
+
+        task_ids, h, z, target, _ = self.task_buffer.sample(
+            batch_size=self.task_batch_size,
+            device=self.device,
+            current_step=self.azr_train_steps,
+        )
+        with torch.no_grad():
+            returns, survival, _ = self._rollout_tasks(
+                h, z, attempts=self.solver_attempts
+            )
+            successes = (
+                (returns > target.unsqueeze(0))
+                & (survival >= self.min_task_continuation)
+            ).float()
+            learnability, pass_rate = compute_azr_learnability(successes)
+            mean_survival = survival.mean(dim=0)
+            valid = (
+                torch.isfinite(returns).all(dim=0)
+                & torch.isfinite(survival).all(dim=0)
+                & (mean_survival >= self.min_task_continuation)
+            )
+            priorities = torch.where(valid, learnability, torch.zeros_like(learnability))
+        self.task_buffer.update(
+            task_ids=task_ids,
+            priorities=priorities,
+            pass_rates=pass_rate,
+            mean_survival=mean_survival,
+            current_step=self.azr_train_steps,
+        )
+
+        active = priorities > 0.0
+        loss_actor = torch.zeros((), device=h.device)
+        imagined_return = torch.zeros((), device=h.device)
+        updated = 0.0
+        if active.any():
+            h_active = h[active].detach()
+            z_active = z[active].detach()
+            weights = priorities[active].detach()
+            weights = weights / weights.mean().clamp_min(1e-6)
+
+            # Freeze model parameters while retaining derivatives from actions
+            # through the dynamics.  Only the deployed actor is optimized.
+            self._set_world_model_grad(False)
+            try:
+                imagined_returns, _, log_probs = self._rollout_tasks(
+                    h_active, z_active, attempts=1
+                )
+                imagined_return = imagined_returns[0].mean()
+                alpha = self._alpha_for_actor()
+                loss_actor = self.imagination_actor_scale * (
+                    weights * (alpha * log_probs[0] - imagined_returns[0])
+                ).mean()
+                self.pi_optimizer.zero_grad(set_to_none=True)
+                loss_actor.backward()
+                torch.nn.utils.clip_grad_norm_(
+                    self.model.actor.parameters(), max_norm=self.imagination_grad_clip
+                )
+                self.pi_optimizer.step()
+                updated = 1.0
+            finally:
+                self._set_world_model_grad(True)
+
+        metrics.update(
+            azr_task_buffer_size=float(len(self.task_buffer)),
+            azr_mean_pass_rate=pass_rate.mean().item(),
+            azr_mean_learnability=learnability.mean().item(),
+            azr_mean_survival=mean_survival.mean().item(),
+            loss_imagination_actor=loss_actor.detach().item(),
+            mean_imagined_return=imagined_return.detach().item(),
+            imagined_policy_updates=updated,
+        )
+        return metrics
+
+    def train(self, batch):
+        o, a, r, o2, d, truncated = batch
+        world_model_metrics = self._train_world_model(o, a, r, o2, d, truncated)
+        metrics = super().train(batch)
+        metrics.update(world_model_metrics)
+        azr_metrics = self._empty_azr_metrics()
+        self.azr_train_steps += 1
+
+        ready = (
+            self.enable_azr_imagination
+            and self.world_model_updates >= self.world_model_warmup_steps
+        )
+        if ready and not self._azr_activation_logged:
+            logging.info(
+                "AZR imagination activated after %s world-model updates; "
+                "task proposal and screened actor updates are now enabled.",
+                self.world_model_updates,
+            )
+            self._azr_activation_logged = True
+        azr_metrics["azr_ready"] = float(ready)
+        if ready and self.azr_train_steps % self.task_proposal_interval == 0:
+            azr_metrics.update(self._propose_and_validate_tasks(o))
+            azr_metrics["azr_ready"] = 1.0
+        if (
+            ready
+            and len(self.task_buffer) > 0
+            and self.azr_train_steps % self.imagination_interval == 0
+        ):
+            proposal_metrics = azr_metrics.copy()
+            azr_metrics.update(self._refresh_tasks_and_train_actor())
+            # Preserve counts/loss from a proposal performed on the same step.
+            for key in ("azr_tasks_proposed", "azr_tasks_accepted", "loss_adversary"):
+                azr_metrics[key] = proposal_metrics[key]
+            azr_metrics["azr_ready"] = 1.0
+
+        azr_metrics["azr_task_buffer_size"] = float(len(self.task_buffer))
+        metrics.update(azr_metrics)
+        return metrics

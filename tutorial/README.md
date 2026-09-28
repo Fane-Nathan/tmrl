@@ -1,5 +1,8 @@
 # TMRL tutorial scripts
 
+For the opt-in recurrent world-model controller, see
+[Recurrent Dreamer control](../readme/dreamer_control.md).
+
 :warning: _For simplicity, the "tuto" scripts  launch the `Server`, the `Trainer` and a `RolloutWorker` in one go.
 In real-world applications, you often want to launch these entities in separate terminals / machines instead.
 See for instance [this script](competition/custom_actor_module.py)._
@@ -17,6 +20,11 @@ While TMRL primarily targets real-time environments, this scripts illustrates op
 
 [tuto_minimal_pendulum_jax.py](tuto_minimal_pendulum_jax.py) is an equivalent of the previous script, using the TMRL pipeline for JAX / Flax NNX instead of torch.
 It illustrates how to leverage TMRL JAX support to develop extremely optimized training pipelines that can run on TPUs.
+
+The experimental self-play and world-model scripts are described in
+[AZR, Latent Imagination, and Zero-Shot Transfer](../readme/azr_latent_imagination.md).
+Their smoke tests verify execution only; use the held-out evaluation protocol in
+that note before making a zero-shot-transfer claim.
 
 ## Ad-hoc optimized TMRL pipelines:
 
