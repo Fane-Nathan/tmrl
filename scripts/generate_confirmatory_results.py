@@ -257,7 +257,7 @@ def generate_confirmatory_artifacts(results_dir: str | Path, output_dir: str | P
     with open(summary_csv_path, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         writer.writerow(["Condition", "N_Seeds", "Adaptive_Mean", "Adaptive_CI95_Low", "Adaptive_CI95_High",
-                         "NoHistory_Mean", "NoHistory_CI95_Low", "NoHistory_CI95_High",
+                         "HistoryBlocked_Mean", "NoHistory_CI95_Low", "NoHistory_CI95_High",
                          "Gap_G_Mean", "Gap_G_CI95_Low", "Gap_G_CI95_High",
                          "Reactive_Mean", "Reactive_CI95_Low", "Reactive_CI95_High",
                          "Advantage_D_Mean", "Advantage_D_CI95_Low", "Advantage_D_CI95_High"])
@@ -292,7 +292,7 @@ def generate_confirmatory_artifacts(results_dir: str | Path, output_dir: str | P
         "\\begin{tabular}{lccccc}\n"
         "\\toprule\n"
         "\\textbf{Held-Out Condition} & \\textbf{Transformer} & \\textbf{Transformer} & \\textbf{Adaptation Gap} & \\textbf{Reactive Baseline} & \\textbf{Control Advantage} \\\\\n"
-        " & \\textbf{(Adaptive History)} & \\textbf{(No-History)} & ($G = R_{\\text{adapt}} - R_{\\text{no-hist}}$) & \\textbf{(MLP REDQ)} & ($D = R_{\\text{adapt}} - R_{\\text{reactive}}$) \\\\\n"
+        " & \\textbf{(Adaptive History)} & \\textbf{(History-Blocked)} & ($G = R_{\\text{adapt}} - R_{\\text{blocked}}$) & \\textbf{(MLP REDQ)} & ($D = R_{\\text{adapt}} - R_{\\text{reactive}}$) \\\\\n"
         "\\midrule\n"
     )
 

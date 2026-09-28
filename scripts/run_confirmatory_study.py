@@ -30,6 +30,7 @@ def get_job_list(
     algorithms: List[str],
     seeds: List[int],
     output_dir: Path,
+    expected_protocol_sha256: str,
     skip_completed: bool = True,
 ) -> List[Dict[str, Any]]:
     jobs = []
@@ -54,8 +55,10 @@ def get_job_list(
                     with open(report_file, "r", encoding="utf-8") as f:
                         data = json.load(f)
                     if "test_results" in data and "test_latency" in data["test_results"]:
-                        # Also ensure it has 100 iters or full test
-                        if data.get("best_val_score") is not None:
+                        if (
+                            data.get("best_val_score") is not None
+                            and data.get("protocol_sha256") == expected_protocol_sha256
+                        ):
                             already_done = True
                 except Exception:
                     already_done = False
@@ -210,8 +213,8 @@ def main():
         "--seeds",
         type=int,
         nargs="+",
-        default=[42, 43, 44, 45, 46, 47, 48, 49],
-        help="Seeds to execute",
+        default=None,
+        help="Seeds to execute. Defaults to seed_list from the protocol.",
     )
     parser.add_argument(
         "--parallel",
@@ -234,13 +237,13 @@ def main():
     parser.add_argument(
         "--config",
         type=str,
-        default=str(REPO_ROOT / "confirmatory_protocol.json"),
+        default=str(REPO_ROOT / "confirmatory_protocol_v2.json"),
         help="Path to protocol configuration JSON",
     )
     parser.add_argument(
         "--output_dir",
         type=str,
-        default=str(REPO_ROOT / "fault_benchmark_results"),
+        default=str(REPO_ROOT / "fault_benchmark_results_v2"),
         help="Output directory",
     )
     parser.add_argument(
@@ -266,11 +269,21 @@ def main():
 
     output_dir = Path(args.output_dir).resolve()
     config_path = Path(args.config).resolve()
+    if not config_path.is_file():
+        raise FileNotFoundError(f"Confirmatory protocol not found: {config_path}")
+
+    import hashlib
+    import json
+    protocol_bytes = config_path.read_bytes()
+    protocol_sha256 = hashlib.sha256(protocol_bytes).hexdigest()
+    protocol = json.loads(protocol_bytes.decode("utf-8"))
+    seeds = args.seeds if args.seeds is not None else list(protocol["seed_list"])
 
     jobs = get_job_list(
         algorithms=algs,
-        seeds=args.seeds,
+        seeds=seeds,
         output_dir=output_dir,
+        expected_protocol_sha256=protocol_sha256,
         skip_completed=not args.force,
     )
 

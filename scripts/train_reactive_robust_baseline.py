@@ -8,7 +8,9 @@ Answers the question:
 
 Specifications:
 - No transformer, no sequence replay, no context deque across time.
-- Input is pure state observation s_t (17-dim).
+- Input is the same single augmented token used by the sequence agent:
+  [s_t, a_{t-1}, r_{t-1}, d_{t-1}] (25-dim in HalfCheetah-v5).
+  It has no multi-step context.
 - REDQ critic ensemble (N=10, M=2) with LayerNorm to match capacity and stability.
 - Trained on the exact same randomized fault distribution (action_scale + action_noise).
 - Clean validation-selected checkpointing (saving best validation checkpoint).
@@ -225,9 +227,13 @@ def train_reactive_baseline(
     os.makedirs(output_dir, exist_ok=True)
 
     config_dict: Dict[str, Any] = {}
+    protocol_version = "unversioned"
+    protocol_sha256 = ""
     if config_path and os.path.exists(config_path):
         with open(config_path, "r") as f:
             config_dict = json.load(f)
+        protocol_version = str(config_dict.get("protocol_version", "unversioned"))
+        protocol_sha256 = compute_file_sha256(config_path)
         budget = config_dict.get("training_budget", {})
         iterations = budget.get("iterations", iterations)
         collection_episodes_per_iter = budget.get("collection_episodes_per_iter", collection_episodes_per_iter)
@@ -268,6 +274,8 @@ def train_reactive_baseline(
         "test_episodes": test_episodes,
         "base_eval_seed": base_eval_seed,
         "device": device,
+        "protocol_version": protocol_version,
+        "protocol_sha256": protocol_sha256,
     }
     run_dir = setup_run_directory(output_dir, run_name, run_config, seed, REPO_ROOT)
 
@@ -328,11 +336,16 @@ def train_reactive_baseline(
 
     print(f"[{time.strftime('%X')}] Starting Reactive Seed {seed} | Device: {device} | LayerNorm: {use_layernorm}", flush=True)
 
+    first_training_reset = True
     for it in range(1, iterations + 1):
         t_it_start = time.time()
         agent.train()
         for _ in range(collection_episodes_per_iter):
-            obs, _ = train_env.reset()
+            if first_training_reset:
+                obs, _ = train_env.reset(seed=seed)
+                first_training_reset = False
+            else:
+                obs, _ = train_env.reset()
             term, trunc = False, False
 
             while not (term or trunc):
@@ -393,8 +406,15 @@ def train_reactive_baseline(
 
         # Validation on VALIDATION SPLIT ONLY
         if it % val_interval == 0 or it == iterations:
+            base_validation_seed = int(
+                config_dict.get("evaluation_protocol", {}).get("base_validation_seed", 40000)
+            )
             val_score, _, _ = evaluate_reactive_policy(
-                agent, split="val", episodes=val_episodes, device=device, base_seed=seed + 5000 + it
+                agent,
+                split="val",
+                episodes=val_episodes,
+                device=device,
+                base_seed=base_validation_seed,
             )
             val_history.append({"iter": it, "val_return": val_score})
             improved = val_score > best_val_score
@@ -430,6 +450,8 @@ def train_reactive_baseline(
         "frozen_timestamp": train_end_str,
         "selection_rule": "argmax_validation_score",
         "validation_split": "unseen parameters of action_scale & action_noise",
+        "protocol_version": protocol_version,
+        "protocol_sha256": protocol_sha256,
     }
     with open(run_dir / "checkpoint_metadata.json", "w") as f:
         json.dump(checkpoint_metadata, f, indent=2)
@@ -460,6 +482,9 @@ def train_reactive_baseline(
     summary = {
         "algorithm": "reactive_robust_baseline",
         "seed": seed,
+        "protocol_version": protocol_version,
+        "protocol_sha256": protocol_sha256,
+        "observation_definition": "single_augmented_token_s_a_prev_r_prev_d_prev",
         "use_layernorm": use_layernorm,
         "best_val_score": best_val_score,
         "best_val_iter": best_val_iter,
