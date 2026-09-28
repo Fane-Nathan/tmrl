@@ -1,0 +1,147 @@
+{
+  "protocol_version": "2.0.0",
+  "created_at": "2026-09-28T15:55:00+07:00",
+  "implementation_commit": "21c7e31d224a7d6594cfcfb33f3f695803241a36",
+  "environment": "HalfCheetah-v5",
+  "primary_hypothesis": "H1: A history-conditioned transformer RL2 policy trained only on action_scale and action_noise achieves a positive context-matched adaptation gap on unseen action_latency: G_i = mean_return_adaptive_i - mean_return_history_blocked_i > 0 across independent training seeds i. Adaptive and history-blocked evaluations use identical weights, current augmented observations, context lengths, positional indices, episode seeds, and fault draws; only access to prior tokens by the final query is removed.",
+  "secondary_question": "Does the adaptive sequence policy provide better held-out control performance than an independently trained single-token reactive REDQ baseline receiving the same augmented observation token?",
+  "primary_endpoint": "action_latency",
+  "secondary_endpoints": [
+    "dead_actuator",
+    "sign_flip"
+  ],
+  "primary_ablation": {
+    "name": "history_blocked_context_matched",
+    "definition": "Preserve the adaptive context deque, sequence length, current augmented token, and positional index, but block the final transformer query from attending to prior tokens in every transformer block."
+  },
+  "secondary_ablation": {
+    "name": "context_reset",
+    "definition": "Clear the context deque before every action. This is retained as a secondary diagnostic only because it also changes the sequence-length regime."
+  },
+  "seed_list": [
+    42,
+    43,
+    44,
+    45,
+    46,
+    47,
+    48,
+    49
+  ],
+  "minimum_acceptable_seeds": 5,
+  "training_faults": {
+    "action_scale": {
+      "low": 0.5,
+      "high": 1.5
+    },
+    "action_noise": {
+      "std": 0.5
+    },
+    "sampling": "uniform_discrete"
+  },
+  "validation_faults": {
+    "action_scale": {
+      "ranges": [
+        [
+          0.2,
+          0.5
+        ],
+        [
+          1.5,
+          1.8
+        ]
+      ]
+    },
+    "action_noise": {
+      "std": 0.75
+    },
+    "notes": "Validation uses only training fault mechanisms with unseen parameter ranges. The same validation episode seeds are reused for every checkpoint comparison. Test faults are never used for checkpoint selection."
+  },
+  "test_faults": {
+    "action_latency": {
+      "delay_min": 1,
+      "delay_max": 5
+    },
+    "dead_actuator": {
+      "action_dim": 6,
+      "locked_value": 0
+    },
+    "sign_flip": {
+      "action_dim": 6,
+      "multiplier": -1
+    }
+  },
+  "transformer_architecture": {
+    "model_type": "transformer_rl2",
+    "obs_dim": 25,
+    "act_dim": 6,
+    "d_model": 64,
+    "n_layers": 2,
+    "n_heads": 2,
+    "d_ff": 128,
+    "dropout": 0.1,
+    "z_dim": 8,
+    "num_critics": 10,
+    "subset_m": 2,
+    "critic_hidden": 256,
+    "actor_hidden": 128,
+    "use_layernorm": true,
+    "lambda_task": 0.05,
+    "context_window": 32,
+    "neural_ode": false,
+    "resel_split": false
+  },
+  "reactive_baseline_architecture": {
+    "model_type": "single_token_reactive_mlp_redq",
+    "observation": "[s_t, a_{t-1}, r_{t-1}, d_{t-1}]",
+    "obs_dim": 25,
+    "act_dim": 6,
+    "actor_hidden": 256,
+    "critic_hidden": 256,
+    "num_critics": 10,
+    "subset_m": 2,
+    "use_layernorm": true
+  },
+  "optimization": {
+    "batch_size": 64,
+    "gamma": 0.99,
+    "polyak": 0.995,
+    "actor_lr": 0.0003,
+    "critic_lr": 0.00015,
+    "alpha_lr": 0.0003,
+    "target_entropy": -6,
+    "grad_clip_norm": 10,
+    "burn_in": 8,
+    "train_seq_len": 24,
+    "total_seq_len": 32,
+    "replay_capacity": 1000000
+  },
+  "training_budget": {
+    "iterations": 100,
+    "collection_episodes_per_iter": 4,
+    "gradient_steps_per_iter": 100,
+    "utd": 10,
+    "val_interval": 10,
+    "val_episodes": 10
+  },
+  "evaluation_protocol": {
+    "episodes_per_condition": 25,
+    "deterministic_policy": true,
+    "checkpoint_selection_rule": "argmax_fixed_validation_score",
+    "paired_common_random_numbers": true,
+    "base_validation_seed": 40000,
+    "base_eval_seed": 50000,
+    "test_evaluation": "once_after_checkpoint_freeze"
+  },
+  "statistical_protocol": {
+    "independent_unit": "training_seed",
+    "n_bootstrap": 2000,
+    "confidence_interval": 0.95
+  },
+  "predetermined_decision_rules": {
+    "CASE_A": "mean G > 0 and 95% seed-level bootstrap CI excludes 0 on positive side -> SUPPORTED POSITIVE CONTEXT-MATCHED ADAPTATION",
+    "CASE_B": "95% seed-level bootstrap CI includes 0 -> ADAPTATION NOT ESTABLISHED",
+    "CASE_C": "mean G < 0 and 95% seed-level bootstrap CI excludes 0 on negative side -> NEGATIVE HISTORY EFFECT",
+    "CASE_D": "large heterogeneous seed effects with inconsistent signs across seeds -> SEED-SENSITIVE / UNSTABLE"
+  }
+}
