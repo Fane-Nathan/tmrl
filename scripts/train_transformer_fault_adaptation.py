@@ -572,7 +572,7 @@ def train_transformer_agent(
         "device": device,
         "protocol_version": protocol_version,
         "protocol_sha256": protocol_sha256,
-        "context_window": seq_len,
+        "context_window": burn_in + train_seq_len,
     }
     run_dir = setup_run_directory(output_dir, run_name, run_config, seed, REPO_ROOT)
 
