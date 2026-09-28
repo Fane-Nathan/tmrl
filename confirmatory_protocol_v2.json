@@ -1,7 +1,7 @@
 {
   "protocol_version": "2.0.0",
   "created_at": "2026-09-28T15:55:00+07:00",
-  "implementation_commit": "21c7e31d224a7d6594cfcfb33f3f695803241a36",
+  "implementation_commit": "1ee87b1e35beff2ae51a376cb85f9902678d086d",
   "environment": "HalfCheetah-v5",
   "primary_hypothesis": "H1: A history-conditioned transformer RL2 policy trained only on action_scale and action_noise achieves a positive context-matched adaptation gap on unseen action_latency: G_i = mean_return_adaptive_i - mean_return_history_blocked_i > 0 across independent training seeds i. Adaptive and history-blocked evaluations use identical weights, current augmented observations, context lengths, positional indices, episode seeds, and fault draws; only access to prior tokens by the final query is removed.",
   "secondary_question": "Does the adaptive sequence policy provide better held-out control performance than an independently trained single-token reactive REDQ baseline receiving the same augmented observation token?",
@@ -143,5 +143,6 @@
     "CASE_B": "95% seed-level bootstrap CI includes 0 -> ADAPTATION NOT ESTABLISHED",
     "CASE_C": "mean G < 0 and 95% seed-level bootstrap CI excludes 0 on negative side -> NEGATIVE HISTORY EFFECT",
     "CASE_D": "large heterogeneous seed effects with inconsistent signs across seeds -> SEED-SENSITIVE / UNSTABLE"
-  }
+  },
+  "last_updated_at": "2026-09-28T16:08:00+07:00"
 }
