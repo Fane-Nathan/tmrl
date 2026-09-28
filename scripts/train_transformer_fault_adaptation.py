@@ -88,19 +88,32 @@ class CausalSelfAttention(nn.Module):
         self.out_proj = nn.Linear(d_model, d_model)
         self.dropout = nn.Dropout(dropout)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, block_history_for_last_token: bool = False) -> torch.Tensor:
         B, T, C = x.shape
         q = self.q_proj(x).view(B, T, self.n_heads, self.head_dim).transpose(1, 2)
         k = self.k_proj(x).view(B, T, self.n_heads, self.head_dim).transpose(1, 2)
         v = self.v_proj(x).view(B, T, self.n_heads, self.head_dim).transpose(1, 2)
 
-        # PyTorch causal flash attention
-        out = F.scaled_dot_product_attention(
-            q, k, v,
-            attn_mask=None,
-            dropout_p=self.dropout.p if self.training else 0.0,
-            is_causal=True,
-        )
+        dropout_p = self.dropout.p if self.training else 0.0
+        if block_history_for_last_token:
+            # Context-matched ablation: preserve sequence length and positional
+            # index, but prevent the current query from reading prior tokens.
+            allowed = torch.tril(torch.ones((T, T), dtype=torch.bool, device=x.device))
+            allowed[-1, :] = False
+            allowed[-1, -1] = True
+            out = F.scaled_dot_product_attention(
+                q, k, v,
+                attn_mask=allowed,
+                dropout_p=dropout_p,
+                is_causal=False,
+            )
+        else:
+            out = F.scaled_dot_product_attention(
+                q, k, v,
+                attn_mask=None,
+                dropout_p=dropout_p,
+                is_causal=True,
+            )
         out = out.transpose(1, 2).contiguous().view(B, T, C)
         return self.out_proj(out)
 
@@ -118,8 +131,11 @@ class TransformerBlock(nn.Module):
             nn.Dropout(dropout),
         )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = x + self.attn(self.ln1(x))
+    def forward(self, x: torch.Tensor, block_history_for_last_token: bool = False) -> torch.Tensor:
+        x = x + self.attn(
+            self.ln1(x),
+            block_history_for_last_token=block_history_for_last_token,
+        )
         x = x + self.mlp(self.ln2(x))
         return x
 
@@ -145,11 +161,18 @@ class TransformerTrunk(nn.Module):
         ])
         self.ln_f = nn.LayerNorm(d_model)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, block_history_for_last_token: bool = False) -> torch.Tensor:
         B, T, _ = x.shape
+        if T > self.pos_emb.shape[1]:
+            raise ValueError(
+                f"Sequence length {T} exceeds positional-embedding capacity {self.pos_emb.shape[1]}"
+            )
         h = self.embedder(x) + self.pos_emb[:, :T, :]
         for block in self.blocks:
-            h = block(h)
+            h = block(
+                h,
+                block_history_for_last_token=block_history_for_last_token,
+            )
         return self.ln_f(h)
 
 
@@ -229,6 +252,7 @@ class TransformerRL2Agent(nn.Module):
         subset_m: int = 2,
         use_layernorm: bool = True,
         lambda_task: float = 0.05,
+        context_window: int = 32,
     ):
         super().__init__()
         self.obs_dim = obs_dim
@@ -238,9 +262,16 @@ class TransformerRL2Agent(nn.Module):
         self.num_critics = num_critics
         self.subset_m = subset_m
         self.lambda_task = lambda_task
+        self.context_window = int(context_window)
+        if self.context_window < 2:
+            raise ValueError("context_window must be at least 2")
 
         # Trunk & Task Encoder
-        self.trunk = TransformerTrunk(in_dim=obs_dim, d_model=d_model)
+        self.trunk = TransformerTrunk(
+            in_dim=obs_dim,
+            d_model=d_model,
+            max_len=self.context_window,
+        )
         self.task_encoder = TaskEncoder(d_model=d_model, z_dim=z_dim, num_classes=7)
 
         # Actor head reads detached trunk + task embedding
@@ -254,7 +285,11 @@ class TransformerRL2Agent(nn.Module):
         ])
 
         # Target critics (copy of critics + trunk)
-        self.target_trunk = TransformerTrunk(in_dim=obs_dim, d_model=d_model)
+        self.target_trunk = TransformerTrunk(
+            in_dim=obs_dim,
+            d_model=d_model,
+            max_len=self.context_window,
+        )
         self.target_task_encoder = TaskEncoder(d_model=d_model, z_dim=z_dim, num_classes=7)
         self.target_critics = nn.ModuleList([
             CriticHead(in_dim=critic_in_dim, hidden_dim=256, use_layernorm=use_layernorm)
@@ -271,8 +306,9 @@ class TransformerRL2Agent(nn.Module):
         for p in self.target_critics.parameters():
             p.requires_grad = False
 
-        # In-context inference deque
-        self.context_deque: deque = deque(maxlen=64)
+        # Never use absolute positional embeddings beyond the horizon exercised
+        # during training.
+        self.context_deque: deque = deque(maxlen=self.context_window)
 
     def reset_context(self) -> None:
         self.context_deque.clear()
@@ -281,6 +317,7 @@ class TransformerRL2Agent(nn.Module):
         self,
         obs: np.ndarray,
         adaptive: bool = True,
+        history_blocked: bool = False,
         deterministic: bool = True,
         device: str = "cpu",
     ) -> np.ndarray:
@@ -291,7 +328,10 @@ class TransformerRL2Agent(nn.Module):
         seq_np = np.asarray(self.context_deque, dtype=np.float32)
         seq = torch.from_numpy(seq_np).unsqueeze(0).to(device)
         with torch.no_grad():
-            h = self.trunk(seq)
+            h = self.trunk(
+                seq,
+                block_history_for_last_token=history_blocked,
+            )
             z, _ = self.task_encoder(h)
             h_last = h[:, -1:]
             z_last = z[:, -1:]
@@ -333,32 +373,48 @@ class SequenceReplayBuffer:
             self.total_steps -= removed["length"]
 
     def sample_batch(self, batch_size: int, device: str = "cpu") -> Dict[str, torch.Tensor]:
-        obs_seqs, act_seqs, rew_seqs, done_seqs, fault_ids = [], [], [], [], []
+        obs_seqs, act_seqs, rew_seqs, done_seqs = [], [], [], []
+        valid_seqs, valid_lengths, fault_ids = [], [], []
         L = self.max_seq_len
 
         for _ in range(batch_size):
             ep = random.choice(self.episodes)
             T = ep["length"]
 
-            if T <= L:
-                # Right-pad short episode
-                pad_len = L - T + 1
-                o = np.pad(ep["obs"], ((0, pad_len), (0, 0)), mode="edge")
-                a = np.pad(ep["acts"], ((0, pad_len), (0, 0)), mode="constant")
-                r = np.pad(ep["rews"], ((0, pad_len), (0, 0)), mode="constant")
-                d = np.pad(ep["dones"], ((0, pad_len), (0, 0)), mode="constant", constant_values=1.0)
+            if T < L:
+                transition_pad = L - T
+                o = np.pad(ep["obs"], ((0, transition_pad), (0, 0)), mode="edge")
+                a = np.pad(ep["acts"], ((0, transition_pad), (0, 0)), mode="constant")
+                r = np.pad(ep["rews"], ((0, transition_pad), (0, 0)), mode="constant")
+                d = np.pad(
+                    ep["dones"],
+                    ((0, transition_pad), (0, 0)),
+                    mode="constant",
+                    constant_values=1.0,
+                )
+                valid = np.concatenate(
+                    [
+                        np.ones(T, dtype=np.float32),
+                        np.zeros(transition_pad, dtype=np.float32),
+                    ]
+                )
                 start = 0
             else:
-                start = random.randint(0, T - L - 1)
+                # T-L is the final valid start and includes the terminal
+                # transition. random.randint is inclusive at both ends.
+                start = random.randint(0, T - L)
                 o = ep["obs"]
                 a = ep["acts"]
                 r = ep["rews"]
                 d = ep["dones"]
+                valid = np.ones(L, dtype=np.float32)
 
             obs_seqs.append(o[start:start + L + 1])
             act_seqs.append(a[start:start + L])
             rew_seqs.append(r[start:start + L])
             done_seqs.append(d[start:start + L])
+            valid_seqs.append(valid)
+            valid_lengths.append(min(T, L))
             fault_ids.append(ep["fault_id"])
 
         return {
@@ -366,6 +422,8 @@ class SequenceReplayBuffer:
             "acts": torch.as_tensor(np.stack(act_seqs), dtype=torch.float32, device=device),
             "rews": torch.as_tensor(np.stack(rew_seqs), dtype=torch.float32, device=device),
             "dones": torch.as_tensor(np.stack(done_seqs), dtype=torch.float32, device=device),
+            "valid": torch.as_tensor(np.stack(valid_seqs), dtype=torch.float32, device=device),
+            "valid_lengths": torch.as_tensor(valid_lengths, dtype=torch.long, device=device),
             "fault_ids": torch.as_tensor(fault_ids, dtype=torch.long, device=device),
         }
 
@@ -382,7 +440,8 @@ def evaluate_policy_on_split(
     agent: TransformerRL2Agent,
     split: str,
     episodes: int = 25,
-    adaptive: bool = True,
+    adaptive: Optional[bool] = None,
+    mode: str = "adaptive",
     device: str = "cpu",
     base_seed: int = 50000,
 ) -> Tuple[float, List[float], List[int]]:
@@ -390,6 +449,11 @@ def evaluate_policy_on_split(
     Evaluates the frozen agent on a specific fault split without parameter updates.
     Uses per-episode deterministic seeds for strictly reproducible, paired evaluation (CRN).
     """
+    if adaptive is not None:
+        mode = "adaptive" if adaptive else "context_reset"
+    if mode not in {"adaptive", "history_blocked", "context_reset"}:
+        raise ValueError(f"Unknown evaluation mode: {mode}")
+
     agent.eval()
     env = make_fault_env("HalfCheetah-v5", split=split, seed=base_seed)
     returns: List[float] = []
@@ -404,7 +468,13 @@ def evaluate_policy_on_split(
         term, trunc = False, False
 
         while not (term or trunc):
-            action = agent.step_in_context(obs, adaptive=adaptive, deterministic=True, device=device)
+            action = agent.step_in_context(
+                obs,
+                adaptive=(mode != "context_reset"),
+                history_blocked=(mode == "history_blocked"),
+                deterministic=True,
+                device=device,
+            )
             obs, rew, term, trunc, _ = env.step(action)
             ep_ret += rew
             ep_len += 1
@@ -447,9 +517,13 @@ def train_transformer_agent(
     os.makedirs(output_dir, exist_ok=True)
 
     config_dict: Dict[str, Any] = {}
+    protocol_version = "unversioned"
+    protocol_sha256 = ""
     if config_path and os.path.exists(config_path):
         with open(config_path, "r") as f:
             config_dict = json.load(f)
+        protocol_version = str(config_dict.get("protocol_version", "unversioned"))
+        protocol_sha256 = compute_file_sha256(config_path)
         budget = config_dict.get("training_budget", {})
         iterations = budget.get("iterations", iterations)
         collection_episodes_per_iter = budget.get("collection_episodes_per_iter", collection_episodes_per_iter)
@@ -461,10 +535,12 @@ def train_transformer_agent(
         test_episodes = eval_proto.get("episodes_per_condition", test_episodes)
         base_eval_seed = eval_proto.get("base_eval_seed", base_eval_seed)
         opt_cfg = config_dict.get("optimization", {})
-        batch_size = opt_cfg.get("batch_size", batch_size)
+        batch_size = int(opt_cfg.get("batch_size", batch_size))
+        burn_in = int(opt_cfg.get("burn_in", burn_in))
+        train_seq_len = int(opt_cfg.get("train_seq_len", train_seq_len))
         arch_cfg = config_dict.get("transformer_architecture", {})
-        lambda_task = arch_cfg.get("lambda_task", lambda_task)
-        use_layernorm = arch_cfg.get("use_layernorm", use_layernorm)
+        lambda_task = float(arch_cfg.get("lambda_task", lambda_task))
+        use_layernorm = bool(arch_cfg.get("use_layernorm", use_layernorm))
 
     if smoke_test:
         iterations = 2
@@ -494,6 +570,9 @@ def train_transformer_agent(
         "test_episodes": test_episodes,
         "base_eval_seed": base_eval_seed,
         "device": device,
+        "protocol_version": protocol_version,
+        "protocol_sha256": protocol_sha256,
+        "context_window": seq_len,
     }
     run_dir = setup_run_directory(output_dir, run_name, run_config, seed, REPO_ROOT)
 
@@ -521,6 +600,14 @@ def train_transformer_agent(
         torch.cuda.manual_seed_all(seed)
 
     seq_len = burn_in + train_seq_len
+    configured_context = int(
+        config_dict.get("transformer_architecture", {}).get("context_window", seq_len)
+    )
+    if configured_context != seq_len:
+        raise ValueError(
+            "context_window must equal burn_in + train_seq_len "
+            f"({configured_context} != {seq_len})"
+        )
     train_env = make_fault_env("HalfCheetah-v5", split="train", seed=seed)
 
     agent = TransformerRL2Agent(
@@ -532,6 +619,7 @@ def train_transformer_agent(
         subset_m=2,
         use_layernorm=use_layernorm,
         lambda_task=lambda_task,
+        context_window=seq_len,
     ).to(device)
 
     # Optimizers
@@ -559,13 +647,18 @@ def train_transformer_agent(
 
     print(f"[{time.strftime('%X')}] Starting Seed {seed} | Device: {device} | Lambda_task: {lambda_task} | LayerNorm: {use_layernorm}", flush=True)
 
+    first_training_reset = True
     for it in range(1, iterations + 1):
         t_it_start = time.time()
         # 1. Collection Phase on TRAIN split
         agent.train()
         for _ in range(collection_episodes_per_iter):
             obs_list, act_list, rew_list, done_list = [], [], [], []
-            obs, info = train_env.reset()
+            if first_training_reset:
+                obs, info = train_env.reset(seed=seed)
+                first_training_reset = False
+            else:
+                obs, info = train_env.reset()
             agent.reset_context()
             term, trunc = False, False
 
@@ -598,14 +691,29 @@ def train_transformer_agent(
                     act_seq = batch["acts"]
                     rew_seq = batch["rews"]
                     done_seq = batch["dones"]
+                    valid_seq = batch["valid"]
+                    valid_lengths = batch["valid_lengths"]
                     fault_ids = batch["fault_ids"]
 
                     h_seq = agent.trunk(obs_seq)
                     z_seq, cls_logits = agent.task_encoder(h_seq)
 
                     with torch.no_grad():
-                        h_next = agent.target_trunk(next_obs_seq)
-                        z_next, _ = agent.target_task_encoder(h_next)
+                        # Match deployment context. For transitions 0..L-2,
+                        # keep the same prefix and advance one token. For the
+                        # final transition, slide the full context window by one.
+                        h_target_prefix = agent.target_trunk(obs_seq)
+                        z_target_prefix, _ = agent.target_task_encoder(h_target_prefix)
+                        h_target_sliding = agent.target_trunk(next_obs_seq)
+                        z_target_sliding, _ = agent.target_task_encoder(h_target_sliding)
+                        h_next = torch.cat(
+                            [h_target_prefix[:, 1:], h_target_sliding[:, -1:]],
+                            dim=1,
+                        )
+                        z_next = torch.cat(
+                            [z_target_prefix[:, 1:], z_target_sliding[:, -1:]],
+                            dim=1,
+                        )
                         actor_next_feat = torch.cat([h_next, z_next], dim=-1)
                         next_act_seq, next_log_prob = agent.actor(actor_next_feat, deterministic=False)
 
@@ -618,16 +726,21 @@ def train_transformer_agent(
                         target_y = rew_seq + (1.0 - done_seq) * 0.99 * (q_min - alpha * next_log_prob)
 
                     critic_in = torch.cat([h_seq, z_seq, act_seq], dim=-1)
+                    loss_mask = valid_seq[:, burn_in:].unsqueeze(-1)
+                    mask_denom = loss_mask.sum().clamp_min(1.0)
                     critic_losses = []
                     for critic in agent.critics:
                         q_pred = critic(critic_in)
-                        c_loss = F.mse_loss(q_pred[:, burn_in:], target_y[:, burn_in:])
+                        sq_error = (q_pred[:, burn_in:] - target_y[:, burn_in:]).pow(2)
+                        c_loss = (sq_error * loss_mask).sum() / mask_denom
                         critic_losses.append(c_loss)
                     total_critic_loss = sum(critic_losses)
 
                     cls_loss = torch.zeros(1, device=device)
                     if agent.lambda_task > 0.0:
-                        cls_loss = F.cross_entropy(cls_logits[:, -1], fault_ids)
+                        last_valid = (valid_lengths - 1).clamp(min=0, max=seq_len - 1)
+                        batch_idx = torch.arange(cls_logits.shape[0], device=device)
+                        cls_loss = F.cross_entropy(cls_logits[batch_idx, last_valid], fault_ids)
 
                     total_loss = total_critic_loss + agent.lambda_task * cls_loss
 
@@ -656,22 +769,38 @@ def train_transformer_agent(
                 q_actor_min = torch.min(q1_pred, q2_pred)
 
                 alpha = log_alpha.exp()
-                actor_loss = ((alpha.detach() * log_pi[:, burn_in:]) - q_actor_min[:, burn_in:]).mean()
+                actor_objective = (
+                    (alpha.detach() * log_pi[:, burn_in:]) - q_actor_min[:, burn_in:]
+                )
+                actor_mask = valid_seq[:, burn_in:].unsqueeze(-1)
+                actor_denom = actor_mask.sum().clamp_min(1.0)
+                actor_loss = (actor_objective * actor_mask).sum() / actor_denom
 
                 actor_opt.zero_grad(set_to_none=True)
                 actor_loss.backward()
                 nn.utils.clip_grad_norm_(agent.actor.parameters(), 10.0)
                 actor_opt.step()
 
-                alpha_loss = -(log_alpha * (log_pi[:, burn_in:].detach() + target_entropy)).mean()
+                alpha_objective = -(
+                    log_alpha * (log_pi[:, burn_in:].detach() + target_entropy)
+                )
+                alpha_loss = (alpha_objective * actor_mask).sum() / actor_denom
                 alpha_opt.zero_grad(set_to_none=True)
                 alpha_loss.backward()
                 alpha_opt.step()
 
         # 3. Clean Periodic Evaluation on VALIDATION SPLIT ONLY
         if it % val_interval == 0 or it == iterations:
+            base_validation_seed = int(
+                config_dict.get("evaluation_protocol", {}).get("base_validation_seed", 40000)
+            )
             val_score, _, _ = evaluate_policy_on_split(
-                agent, split="val", episodes=val_episodes, adaptive=True, device=device, base_seed=seed + 5000 + it
+                agent,
+                split="val",
+                episodes=val_episodes,
+                mode="adaptive",
+                device=device,
+                base_seed=base_validation_seed,
             )
             val_history.append({"iter": it, "val_return": val_score})
             improved = val_score > best_val_score
@@ -707,6 +836,8 @@ def train_transformer_agent(
         "frozen_timestamp": train_end_str,
         "selection_rule": "argmax_validation_score",
         "validation_split": "unseen parameters of action_scale & action_noise",
+        "protocol_version": protocol_version,
+        "protocol_sha256": protocol_sha256,
     }
     with open(run_dir / "checkpoint_metadata.json", "w") as f:
         json.dump(checkpoint_metadata, f, indent=2)
@@ -719,37 +850,60 @@ def train_transformer_agent(
     test_conditions = ["test_latency", "test_dead", "test_sign_flip"]
 
     for condition in test_conditions:
-        # PAIRED Common Random Numbers (CRN) evaluation: same base_eval_seed ensures identical episode initial states & faults
         ad_mean, ad_raw, ad_lens = evaluate_policy_on_split(
-            agent, split=condition, episodes=test_episodes, adaptive=True, device=device, base_seed=base_eval_seed
+            agent, split=condition, episodes=test_episodes, mode="adaptive",
+            device=device, base_seed=base_eval_seed
         )
-        nh_mean, nh_raw, nh_lens = evaluate_policy_on_split(
-            agent, split=condition, episodes=test_episodes, adaptive=False, device=device, base_seed=base_eval_seed
+        hb_mean, hb_raw, hb_lens = evaluate_policy_on_split(
+            agent, split=condition, episodes=test_episodes, mode="history_blocked",
+            device=device, base_seed=base_eval_seed
         )
-        gap = ad_mean - nh_mean
+        cr_mean, cr_raw, cr_lens = evaluate_policy_on_split(
+            agent, split=condition, episodes=test_episodes, mode="context_reset",
+            device=device, base_seed=base_eval_seed
+        )
+        gap = ad_mean - hb_mean
+        reset_gap = ad_mean - cr_mean
         test_results[condition] = {
             "adaptive_mean": ad_mean,
-            "no_history_mean": nh_mean,
+            "history_blocked_mean": hb_mean,
+            "no_history_mean": hb_mean,
+            "context_reset_mean": cr_mean,
             "adaptation_gap": gap,
+            "context_reset_gap": reset_gap,
             "raw_adaptive": ad_raw,
-            "raw_no_history": nh_raw,
-            "raw_gaps": [a - n for a, n in zip(ad_raw, nh_raw)],
+            "raw_history_blocked": hb_raw,
+            "raw_no_history": hb_raw,
+            "raw_context_reset": cr_raw,
+            "raw_gaps": [a - b for a, b in zip(ad_raw, hb_raw)],
+            "raw_context_reset_gaps": [a - r for a, r in zip(ad_raw, cr_raw)],
             "raw_lengths_adaptive": ad_lens,
-            "raw_lengths_no_history": nh_lens,
+            "raw_lengths_history_blocked": hb_lens,
+            "raw_lengths_no_history": hb_lens,
+            "raw_lengths_context_reset": cr_lens,
         }
 
         with open(raw_episodes_csv, "a", newline="", encoding="utf-8") as f:
             for ep_idx in range(len(ad_raw)):
                 ep_s = base_eval_seed + ep_idx * 100
                 f.write(f"transformer_rl2,{seed},{condition},adaptive,{ep_idx},{ep_s},{ad_raw[ep_idx]:.4f},{ad_lens[ep_idx]},{checkpoint_hash}\n")
-                f.write(f"transformer_rl2,{seed},{condition},no_history,{ep_idx},{ep_s},{nh_raw[ep_idx]:.4f},{nh_lens[ep_idx]},{checkpoint_hash}\n")
+                f.write(f"transformer_rl2,{seed},{condition},history_blocked,{ep_idx},{ep_s},{hb_raw[ep_idx]:.4f},{hb_lens[ep_idx]},{checkpoint_hash}\n")
+                f.write(f"transformer_rl2,{seed},{condition},context_reset,{ep_idx},{ep_s},{cr_raw[ep_idx]:.4f},{cr_lens[ep_idx]},{checkpoint_hash}\n")
 
         endpoint_tag = "PRIMARY ENDPOINT" if condition == "test_latency" else "SECONDARY ENDPOINT"
-        print(f"  [{endpoint_tag}] '{condition:15s}' | Adaptive: {ad_mean:+.2f} | No-History: {nh_mean:+.2f} | Gap (G): {gap:+.2f}", flush=True)
+        print(
+            f"  [{endpoint_tag}] '{condition:15s}' | Adaptive: {ad_mean:+.2f} | "
+            f"History-Blocked: {hb_mean:+.2f} | Gap (G): {gap:+.2f} | "
+            f"Context-Reset: {cr_mean:+.2f}",
+            flush=True,
+        )
 
     summary = {
         "algorithm": "transformer_rl2",
         "seed": seed,
+        "protocol_version": protocol_version,
+        "protocol_sha256": protocol_sha256,
+        "primary_ablation": "history_blocked_context_matched",
         "lambda_task": lambda_task,
         "use_layernorm": use_layernorm,
         "best_val_score": best_val_score,
