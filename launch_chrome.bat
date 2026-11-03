@@ -1,3 +1,0 @@
-@echo off
-echo Starting Google Chrome with Remote Debugging (port 9222)...
-start "" "C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9222 --user-data-dir="D:\chatgpt\chatgpt_api\chrome_profile" "https://chatgpt.com"
