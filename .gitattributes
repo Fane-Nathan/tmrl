@@ -1,0 +1,7 @@
+# Files whose sha256 is recorded in run manifests and experiments/sensor_adaptation_v1/model_provenance.json.
+# Store and check them out byte-for-byte on every platform, so a fresh clone hashes the same as the run snapshots.
+experiments/sensor_adaptation_v1/** -text
+scripts/benchmark_fault_env.py -text
+scripts/confirmatory_logging.py -text
+scripts/train_transformer_source_recipe_v1.py -text
+scripts/train_reactive_source_recipe_v1.py -text
