@@ -9,30 +9,30 @@
 
 This repository contains two major interconnected codebases: the **TrackMania Reinforcement Learning (`tmrl`)** system and the **ICoDiT 2026 Continual Sensor-Adaptation Research Suite**.
 
-### [TrackMania RL Core Framework (`tmrl/`)](tmrl_core/overview.md) (78 files)
+### [TrackMania RL Core Framework (`tmrl/`)](tmrl_core.md) (78 files)
 Networking, actor-critic architectures, Gym environments, memory buffers, and TrackMania interface wrappers.
 
-👉 **[Explore TrackMania RL Core Framework (`tmrl/`) Documentation &raquo;](tmrl_core/overview.md)**
+👉 **[Explore TrackMania RL Core Framework (`tmrl/`) Documentation &raquo;](tmrl_core.md)**
 
-### [Sensor Adaptation Research Suite (`experiments/`)](sensor_adaptation_study/overview.md) (16 files)
+### [Sensor Adaptation Research Suite (`experiments/`)](sensor_adaptation_study.md) (16 files)
 ICoDiT 2026 Camera-Ready experimental protocols, MuJoCo sensor fault wrappers, SAC learners, and statistical analysis scripts.
 
-👉 **[Explore Sensor Adaptation Research Suite (`experiments/`) Documentation &raquo;](sensor_adaptation_study/overview.md)**
+👉 **[Explore Sensor Adaptation Research Suite (`experiments/`) Documentation &raquo;](sensor_adaptation_study.md)**
 
-### [Execution Scripts & Build Pipelines (`scripts/`)](scripts_and_tools/overview.md) (46 files)
+### [Execution Scripts & Build Pipelines (`scripts/`)](scripts_and_tools.md) (46 files)
 Source training recipes, automated unattended pipelines, latency benchmarking, and camera-ready LaTeX asset builders.
 
-👉 **[Explore Execution Scripts & Build Pipelines (`scripts/`) Documentation &raquo;](scripts_and_tools/overview.md)**
+👉 **[Explore Execution Scripts & Build Pipelines (`scripts/`) Documentation &raquo;](scripts_and_tools.md)**
 
-### [Diagnostic & Scratch Utilities (`scratch/`)](scratch_and_experiments/overview.md) (5 files)
+### [Diagnostic & Scratch Utilities (`scratch/`)](scratch_and_experiments.md) (5 files)
 Prototyping scripts, vision encoder checks, and empirical validation tools.
 
-👉 **[Explore Diagnostic & Scratch Utilities (`scratch/`) Documentation &raquo;](scratch_and_experiments/overview.md)**
+👉 **[Explore Diagnostic & Scratch Utilities (`scratch/`) Documentation &raquo;](scratch_and_experiments.md)**
 
-### [Top-Level Root Modules](top_level/overview.md) (27 files)
+### [Top-Level Root Modules](top_level.md) (27 files)
 Root package configuration, entry points, and setup scripts.
 
-👉 **[Explore Top-Level Root Modules Documentation &raquo;](top_level/overview.md)**
+👉 **[Explore Top-Level Root Modules Documentation &raquo;](top_level.md)**
 
 ---
 ## High-Level Architecture
@@ -75,7 +75,7 @@ graph TD
 - [`tests\test_unseen_map_evaluation.py`](file:///D:/Project/tmrl/tests/test_unseen_map_evaluation.py)
 - [`tests\test_visual_training.py`](file:///D:/Project/tmrl/tests/test_visual_training.py)
 - [`tmp\finalize_sensor_pack.py`](file:///D:/Project/tmrl/tmp/finalize_sensor_pack.py)
-- *...and 12 more files (see [top_level/overview.md](top_level/overview.md))*
+- *...and 12 more files (see [top_level/overview.md](top_level.md))*
 
 ### `sensor_adaptation_study/`
 
@@ -94,7 +94,7 @@ graph TD
 - [`experiments\sensor_adaptation_v1\test_contracts.py`](file:///D:/Project/tmrl/experiments/sensor_adaptation_v1/test_contracts.py)
 - [`experiments\sensor_adaptation_v1\upload_wandb.py`](file:///D:/Project/tmrl/experiments/sensor_adaptation_v1/upload_wandb.py)
 - [`experiments\sensor_adaptation_v1\verify_review_release.py`](file:///D:/Project/tmrl/experiments/sensor_adaptation_v1/verify_review_release.py)
-- *...and 1 more files (see [sensor_adaptation_study/overview.md](sensor_adaptation_study/overview.md))*
+- *...and 1 more files (see [sensor_adaptation_study/overview.md](sensor_adaptation_study.md))*
 
 ### `scratch_and_experiments/`
 
@@ -121,7 +121,7 @@ graph TD
 - [`scripts\data\convert_raw_gbx_to_dataset.py`](file:///D:/Project/tmrl/scripts/data/convert_raw_gbx_to_dataset.py)
 - [`scripts\data\download_1k_diverse_maps.py`](file:///D:/Project/tmrl/scripts/data/download_1k_diverse_maps.py)
 - [`scripts\data\ultra_fast_1m_scraper.py`](file:///D:/Project/tmrl/scripts/data/ultra_fast_1m_scraper.py)
-- *...and 31 more files (see [scripts_and_tools/overview.md](scripts_and_tools/overview.md))*
+- *...and 31 more files (see [scripts_and_tools/overview.md](scripts_and_tools.md))*
 
 ### `tmrl_core/`
 
@@ -140,4 +140,4 @@ graph TD
 - [`tmrl\core\memory.py`](file:///D:/Project/tmrl/tmrl/core/memory.py)
 - [`tmrl\core\networking.py`](file:///D:/Project/tmrl/tmrl/core/networking.py)
 - [`tmrl\core\torch\__init__.py`](file:///D:/Project/tmrl/tmrl/core/torch/__init__.py)
-- *...and 63 more files (see [tmrl_core/overview.md](tmrl_core/overview.md))*
+- *...and 63 more files (see [tmrl_core/overview.md](tmrl_core.md))*
