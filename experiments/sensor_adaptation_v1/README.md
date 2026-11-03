@@ -4,14 +4,19 @@ This isolated experiment tests the author's intended **observation** faults and 
 
 ## Run
 
-From this directory, using the research Python environment:
+Standalone: this code does not import the `tmrl` package. Install `requirements.txt` (the versions the paper's results were produced with: Python 3.12.10, PyTorch 2.11.0 with CUDA 12.8, Gymnasium 1.3.0, MuJoCo 3.12.0, numpy 2.5.1; add `--device cpu` to `run_study.py` without a GPU, numbers then differ). Run from this directory:
 
-```powershell
-& 'D:\Project\tmrl\.venv\Scripts\python.exe' test_contracts.py
-& 'D:\Project\tmrl\.venv\Scripts\python.exe' -u run_study.py --output 'D:\Project\tmrl\output\sensor_adaptation\UNUSED_RUN_NAME' --smoke
-& 'D:\Project\tmrl\.venv\Scripts\python.exe' -u run_study.py --output 'D:\Project\tmrl\output\sensor_adaptation\ANOTHER_UNUSED_RUN_NAME'
-& 'D:\Project\tmrl\.venv\Scripts\python.exe' analyze_results.py 'D:\Project\tmrl\output\sensor_adaptation\ANOTHER_UNUSED_RUN_NAME'
+```bash
+pip install -r requirements.txt
+python test_contracts.py                                                          # 12 behavioral tests
+python -u run_study.py --protocol protocol.json --output ../../runs/pilot --smoke # tiny end-to-end check
+python -u run_study.py --protocol protocol.json --output ../../runs/pilot         # 3-seed, 4,000-step pilot
+python analyze_results.py ../../runs/pilot
 ```
+
+The study reads source checkpoints from `<repo>/fault_benchmark_results/{transformer,reactive}_seed_<N>/best_validation_checkpoint.pt` (HalfCheetah) or `<repo>/fault_benchmark_results_ant/...` (Ant). They are not stored in git; train them with the source recipes in "Source models" below. The `--smoke` run was verified for `protocol_extension.json` and `protocol_ant.json` too (10 branches each).
+
+The experiment files are stored byte-for-byte (`/.gitattributes`: `-text`), because their sha256 values are recorded in the run manifests and in `model_provenance.json`; do not let line-ending conversion or formatting touch them.
 
 Output directories must be new. The runner refuses to overwrite an experiment. Each run freezes its protocol, exact source files, input checkpoints, hashes, and package/hardware versions before collecting results. A full pilot contains 24 branches: three pretrained seeds, two policy types, two sensor faults, and two retained-replay fractions.
 

@@ -45,7 +45,7 @@ LATENCY = ROOT / "output/sensor_adaptation/latency_20261031.json"
 STATUS = ROOT / "output/sensor_adaptation/pipeline_status.json"
 LOG = ROOT / "output/sensor_adaptation/pipeline.log"
 STEPS = ROOT / "output/sensor_adaptation/pipeline_steps"
-PAPER_DONE = ROOT / "output/icodit_2026/camera_ready/PAPER_DONE"
+PAPER_DONE = ROOT / "paper/PAPER_DONE"
 RECIPES = {"transformer": "scripts/train_transformer_source_recipe_v1.py",
            "reactive": "scripts/train_reactive_source_recipe_v1.py"}
 EST_GB = {"study": 3.3, "source": 2.9, "step": 3.0, "light-step": 1.0}  # v3.2: measured 2.66-2.82 GB per job

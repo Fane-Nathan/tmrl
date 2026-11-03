@@ -19,7 +19,7 @@ import numpy as np
 from scipy import stats
 
 ROOT = Path(__file__).resolve().parents[1]
-DEST = ROOT / "output/icodit_2026/camera_ready"
+DEST = ROOT / "paper"
 ENV_NAMES = {"hc": "HalfCheetah-v5", "ant": "Ant-v5"}
 FAULT_KEYS = {"sensor_noise": "noise", "sensor_delay": "delay", "clean": "clean"}
 ALG_LABEL = {"transformer": "Transformer", "reactive": "Reactive"}

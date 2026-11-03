@@ -39,7 +39,7 @@ Before taking any action, ensure the following directories and files are shielde
   - `confirmatory_logging.py`
 * **Base Package (`tmrl/`):** Complete core library.
 * **Camera-Ready & Experimental Data:**
-  - `output/icodit_2026/camera_ready/` (`manuscript.pdf`, LaTeX files, figures)
+  - `paper/` (`manuscript.pdf`, LaTeX files, figures, slides, notes, reporting)
   - `output/sensor_adaptation/` (evaluation trajectories, latency JSON, budget verification)
   - `fault_benchmark_results/` & `fault_benchmark_results_ant/`
 * **Repository Meta:** `.git/`, `pyproject.toml`, `setup.py`, `README.md`, `requirements.txt`.

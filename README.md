@@ -9,6 +9,8 @@
 | [![Documentation Status](https://readthedocs.org/projects/tmrl/badge/?version=latest)](https://tmrl.readthedocs.io/en/latest/?badge=latest) |
 
 
+> **ICoDiT 2026 paper (Paper 193), *History-Conditioned SAC under Sensor Faults*:** the code behind the paper is in [`experiments/sensor_adaptation_v1/`](experiments/sensor_adaptation_v1/README.md) (standalone, does not use `tmrl`), the source-policy recipes in [`scripts/`](scripts/), the manuscript in [`paper/`](paper/README.md).
+
 `tmrl` is a network-based distributed RL framework for robotics, designed to help you train Deep Reinforcement Learning agents in real-time applications.
 `tmrl` supports Pytorch, JAX, Gymnasium and Real-Time Gym.
 

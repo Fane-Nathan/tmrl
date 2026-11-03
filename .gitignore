@@ -148,6 +148,7 @@ demo_data/
 # Ignore experiment folders except the one behind the ICoDiT 2026 paper.
 experiments/*
 !experiments/sensor_adaptation_v1/
+runs/
 weights/
 tmp/
 scratch/

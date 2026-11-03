@@ -16,7 +16,7 @@ import matplotlib.pyplot as plt
 from matplotlib.patches import FancyArrowPatch, FancyBboxPatch
 
 ROOT = Path(__file__).resolve().parents[1]
-DEST = ROOT / "output/icodit_2026/camera_ready"
+DEST = ROOT / "paper"
 CAPTURE = ROOT / "test_output_brain/visual_policy_1k_20260911_v2/capture_preflight_20260912_v2.png"
 
 

@@ -39,7 +39,7 @@ Every file and directory in this reference must **NEVER be deleted** during work
 ---
 
 ## 3. Publication Deliverables & Experimental Records
-* `output/icodit_2026/camera_ready/*`: Complete camera-ready manuscript, LaTeX sources, rebuttal (`RESPONSE_TO_REVIEWERS.md`), and figures.
+* `paper/*`: Complete camera-ready manuscript, LaTeX sources, slides, notes, ePDP reporting, rebuttal (`RESPONSE_TO_REVIEWERS.md`), and figures.
 * `output/sensor_adaptation/extension_20261031_v1/*`: HalfCheetah 80-branch results, metrics, trajectories.
 * `output/sensor_adaptation/ant_20261031_v1/*`: Ant-v5 80-branch results, metrics, trajectories.
 * `output/sensor_adaptation/budget_verification.json`: Exact step/update verification proof.
