@@ -75,7 +75,7 @@ graph TD
 - [`tests\test_unseen_map_evaluation.py`](file:///D:/Project/tmrl/tests/test_unseen_map_evaluation.py)
 - [`tests\test_visual_training.py`](file:///D:/Project/tmrl/tests/test_visual_training.py)
 - [`tmp\finalize_sensor_pack.py`](file:///D:/Project/tmrl/tmp/finalize_sensor_pack.py)
-- *...and 12 more files (see [top_level/overview.md](top_level.md))*
+- *...and 12 more files (see [top_level.md](top_level.md))*
 
 ### `sensor_adaptation_study/`
 
@@ -94,7 +94,7 @@ graph TD
 - [`experiments\sensor_adaptation_v1\test_contracts.py`](file:///D:/Project/tmrl/experiments/sensor_adaptation_v1/test_contracts.py)
 - [`experiments\sensor_adaptation_v1\upload_wandb.py`](file:///D:/Project/tmrl/experiments/sensor_adaptation_v1/upload_wandb.py)
 - [`experiments\sensor_adaptation_v1\verify_review_release.py`](file:///D:/Project/tmrl/experiments/sensor_adaptation_v1/verify_review_release.py)
-- *...and 1 more files (see [sensor_adaptation_study/overview.md](sensor_adaptation_study.md))*
+- *...and 1 more files (see [sensor_adaptation_study.md](sensor_adaptation_study.md))*
 
 ### `scratch_and_experiments/`
 
@@ -121,7 +121,7 @@ graph TD
 - [`scripts\data\convert_raw_gbx_to_dataset.py`](file:///D:/Project/tmrl/scripts/data/convert_raw_gbx_to_dataset.py)
 - [`scripts\data\download_1k_diverse_maps.py`](file:///D:/Project/tmrl/scripts/data/download_1k_diverse_maps.py)
 - [`scripts\data\ultra_fast_1m_scraper.py`](file:///D:/Project/tmrl/scripts/data/ultra_fast_1m_scraper.py)
-- *...and 31 more files (see [scripts_and_tools/overview.md](scripts_and_tools.md))*
+- *...and 31 more files (see [scripts_and_tools.md](scripts_and_tools.md))*
 
 ### `tmrl_core/`
 
@@ -140,4 +140,4 @@ graph TD
 - [`tmrl\core\memory.py`](file:///D:/Project/tmrl/tmrl/core/memory.py)
 - [`tmrl\core\networking.py`](file:///D:/Project/tmrl/tmrl/core/networking.py)
 - [`tmrl\core\torch\__init__.py`](file:///D:/Project/tmrl/tmrl/core/torch/__init__.py)
-- *...and 63 more files (see [tmrl_core/overview.md](tmrl_core.md))*
+- *...and 63 more files (see [tmrl_core.md](tmrl_core.md))*
