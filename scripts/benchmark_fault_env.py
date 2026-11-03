@@ -235,6 +235,11 @@ class FaultInjectionWrapper(gym.Wrapper):
             return 0
 
 
+# Per-environment construction options. Ant-v5 excludes the 78 external contact-force
+# coordinates (27-dim observation), the common low-dimensional Ant benchmark setting.
+ENV_KWARGS = {"Ant-v5": {"include_cfrc_ext_in_observation": False}}
+
+
 def make_fault_env(
     env_id: str = "HalfCheetah-v5",
     split: str = "train",
@@ -242,7 +247,7 @@ def make_fault_env(
     seed: Optional[int] = None,
 ) -> gym.Env:
     """Factory function for creating wrapped fault-injected environments."""
-    base_env = gym.make(env_id)
+    base_env = gym.make(env_id, **ENV_KWARGS.get(env_id, {}))
     return FaultInjectionWrapper(base_env, split=split, fixed_fault=fixed_fault, seed=seed)
 
 

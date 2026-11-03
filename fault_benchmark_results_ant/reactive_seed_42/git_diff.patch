@@ -1,0 +1,496 @@
+diff --git a/output/icodit_2026/START_HERE.md b/output/icodit_2026/START_HERE.md
+index 7f55c752d..cbe291b54 100644
+--- a/output/icodit_2026/START_HERE.md
++++ b/output/icodit_2026/START_HERE.md
+@@ -2,4 +2,6 @@
+ 
+ Use `REVISION_STATUS.md` for the completed sensor-focused revision and its remaining author/conference requirements. Use `CMT_FIELDS_AND_DECLARATIONS.md` for the matching title, abstract, author details and unsent policy inquiry.
+ 
+-The current paper is `sensor_pilot_draft/manuscript.tex`, with its compiled PDF in `../pdf/icodit-2026-sensor-adaptation-pilot.pdf`. The earlier actuator paper and its audit remain historical evidence, not sensor results.
++The current paper is the **15-page figure revision**, `sensor_pilot_with_trackmania_figure/manuscript.tex`, with its compiled PDF in `../pdf/icodit-2026-sensor-pilot-with-trackmania.pdf`. Figure 1 on page 3 adds a real TrackMania development capture and a diagram of the executed HalfCheetah training and evaluation procedure. The numerical results are unchanged.
++
++The earlier 14-page sensor draft remains in `sensor_pilot_draft/`, with its original PDF in `../pdf/icodit-2026-sensor-adaptation-pilot.pdf`. `REVISION_STATUS.md` describes the underlying study and outstanding requirements; its 14-page references refer to that earlier version. The earlier actuator paper and its audit remain historical evidence, not sensor results.
+diff --git a/output/pdf/icodit-2026-sensor-adaptation-pilot.pdf b/output/pdf/icodit-2026-sensor-adaptation-pilot.pdf
+index 81feb0af9..70456afa2 100644
+--- a/output/pdf/icodit-2026-sensor-adaptation-pilot.pdf
++++ b/output/pdf/icodit-2026-sensor-adaptation-pilot.pdf
+@@ -87,6 +87,49 @@ iment’s limits. It does not propose a new general-purpose algorithm, establish
+ adaptation to arbitrary new environments, or equate a short pilot with a solution
+ to forgetting.
+ 
++    Figure 1 links the motivating visual-control application to the controlled pi-
++lot. The TrackMania panel is a saved development capture that illustrates the
++real-time setting; it is not an adaptation measurement. The training and eval-
++uation workflow in panel (b) summarizes the HalfCheetah experiment reported
++here. It makes explicit that the updated controller is tested on both the earlier
++clean condition and the new sensor condition.
++Adaptation and Retention under Sensor Faults                                                                  3
++
++(a) Motivating application: TrackMania 2020
++
++                                                                     Real-time visual control
++                                                                        Goal: learn new conditions
++                                                                        while retaining earlier
++                                                                        control behavior.
++
++                                                                                   Saved development capture
++
++(b) Executed pilot: HalfCheetah-v5          Old condition A: clean
++                                        Collect 2,000 replay transitions
++             Six source policies
++        2 controllers x 3 source seeds
++
++       New condition B                    Continued SAC updates
++Noise or 3-step sensor delay              Old replay fraction: 0 or 0.5
++
++Collect 4,000 new transitions           1,000 update cycles per branch
++
++Freeze the updated checkpoint
++ At 0, 2,000 and 4,000 new B steps
++
++    Evaluate A: retention                Evaluate B: adaptation
++Clean-condition return change           New-condition return change
++
++Same checkpoint for A and B; evaluation episodes stay out of replay.
++
++Fig. 1. Research context and pilot workflow. (a) An actual TrackMania 2020 devel-
++opment capture from a camera-pipeline preflight; the displayed game clock is not a
++benchmark lap time. (b) The executed HalfCheetah-v5 procedure. Each source policy
++branches across two sensor conditions and two replay fractions. Both conditions are
++evaluated using the same updated weights, with learning disabled. Quantitative results
++in this paper come from panel (b).
++4  Anonymous submission
++
+ 1.1 Related Work
+ 
+ Memory and adaptation. Recurrent model-free policies can be strong baselines
+@@ -96,8 +139,6 @@ AMAGO-2 addresses multi-task learning across differing return scales [7]. Algo-
+ rithm Distillation learns from algorithm-generated learning histories [10]. Our
+ much smaller configuration uses a conventional critic-regression objective and
+ directly collected experience. It does not reproduce those complete methods or
+-          Adaptation and Retention under Sensor Faults  3
+-
+ evaluate their task breadth. Its history resets between episodes; continued pa-
+ rameter updates supply the cross-episode adaptation examined here.
+ 
+@@ -133,11 +174,13 @@ function.
+ 
+     For noise, the policy receives
+ 
+-          ot = st + ϵt,  ϵt,j ∼ N (0, σj2),             (1)
++          ot = st + ϵt,  ϵt,j ∼ N (0, σj2),  (1)
+ 
+ independently across coordinates and steps, where σj = 0.1 for the eight position
+ coordinates and σj = 0.5 for the nine velocities. These values are in native ob-
+ servation units; no normalizer is fitted using evaluation data. A separate seeded
++Adaptation and Retention under Sensor Faults  5
++
+ generator produces the corruption so that sensor draws do not change the envi-
+ ronment’s reset randomness.
+ 
+@@ -146,11 +189,10 @@ the sensor vector is zero. The FIFO queue resets at each episode boundary.
+ Both sensor conditions begin at episode reset and remain active throughout the
+ episode. They are known, fixed study conditions; this pilot is not a meta-test
+ over a previously unobserved distribution of sensor mechanisms or severities.
+-4  Anonymous submission
+ 
+-   The model input is
++    The model input is
+ 
+-                       xt = [ot, at−1, rt−1, dt−1] ∈ R25.  (2)
++xt = [ot, at−1, rt−1, dt−1] ∈ R25.            (2)
+ 
+ The command and reward fields retain their current timing; only the base sensor
+ vector is corrupted or delayed. All preceding-action, reward, and termination
+@@ -190,6 +232,8 @@ as a single causal factor.
+     The earlier transformer implementation trained on 32-token windows but
+ could collect and evaluate with 64 tokens. The new pilot restricts collection
+ and evaluation to a rolling queue of at most 32 tokens before any initial or
++6  Anonymous submission
++
+ final measurement. Replay reconstructs exactly the corresponding current and
+ successor histories for each sampled transition. A full successor context slides by
+ one token, while an episode-start context grows until it reaches the cap. Right
+@@ -198,8 +242,6 @@ attending to that padding.
+ 
+     Each sampled history supervises its final valid transition. With probability
+ 0.25, the replay sampler selects a transition from the first up-to-32 transitions of
+-Adaptation and Retention under Sensor Faults  5
+-
+ an episode; otherwise it selects uniformly over the episode. Final transitions are
+ eligible, and an actual successor observation is retained for time-limit bootstrap-
+ ping. These choices support both short deployment contexts and mature rolling
+@@ -242,6 +284,24 @@ source-model update schedule. Each transformer replay sample trains one valid
+ transition, rather than all positions of a sequence; its context still carries a
+ computational cost. Table 1 records the settings. The run environment is Python
+ 3.12.10, PyTorch 2.11.0 with CUDA 12.8, Gymnasium 1.3.0, and MuJoCo 3.12.0
++Adaptation and Retention under Sensor Faults                            7
++
++Table 1. Fixed pilot configuration. Budgets exclude the earlier source-model training.
++
++Setting                                       Value
++
++Pretrained seeds per architecture             3 (42, 43, 44)
++Sensor conditions; replay fractions           2; 0 or 0.5
++New-condition steps per branch                4,000
++Clean replay collected per source model       2,000 transitions
++Batch size; ensemble critics                  64 transitions; 10
++Critic-ensemble / actor updates per branch    1,000 / 1,000
++Actor / critic / temperature learning rates   10−4 / 10−4 / 3×10−4
++Initial entropy temperature; target entropy   0.1; −6
++Discount; target retention; gradient clip     0.99; 0.995; 10
++Evaluation budgets                            0, 2,000, 4,000 steps
++Evaluation episodes per condition and budget  3 deterministic episodes
++
+ on Windows with an NVIDIA GeForce RTX 5070 Laptop GPU. Action inference
+ is on CPU and parameter updates are on GPU.
+ 
+@@ -249,38 +309,17 @@ is on CPU and parameter updates are on GPU.
+ 
+ At budgets n ∈ {0, 2000, 4000}, we evaluate both A and B using the same
+ checkpoint. Parameters are frozen during evaluation, and context resets each
+-6  Anonymous submission
+-
+-Table 1. Fixed pilot configuration. Budgets exclude the earlier source-model training.
+-
+-   Setting                                       Value
+-
+-   Pretrained seeds per architecture             3 (42, 43, 44)
+-   Sensor conditions; replay fractions           2; 0 or 0.5
+-   New-condition steps per branch                4,000
+-   Clean replay collected per source model       2,000 transitions
+-   Batch size; ensemble critics                  64 transitions; 10
+-   Critic-ensemble / actor updates per branch    1,000 / 1,000
+-   Actor / critic / temperature learning rates   10−4 / 10−4 / 3×10−4
+-   Initial entropy temperature; target entropy   0.1; −6
+-   Discount; target retention; gradient clip     0.99; 0.995; 10
+-   Evaluation budgets                            0, 2,000, 4,000 steps
+-   Evaluation episodes per condition and budget  3 deterministic episodes
+-
+ episode. Every condition uses three matched environment seeds, 860000+100e for
+-
+ e = 0, 1, 2. These episodes never enter replay. Evaluation RNG state is isolated
+-
+ from the training RNG. Checkpoints are retained at fixed budgets; neither sensor
+-
+ performance nor retention determines checkpoint selection.
+-    Let RiA,c,ρ(n) and RiB,c,ρ(n) denote mean evaluation returns for source seed i,
+ 
++    Let RiA,c,ρ(n) and RiB,c,ρ(n) denote mean evaluation returns for source seed i,
+ sensor condition c, replay fraction ρ, and adaptation budget n. We report
+ 
+-   ∆Bi,c,ρ(n) = RiB,c,ρ(n) − RiB,c,ρ(0),                                   (3)
++∆iB,c,ρ(n) = RiB,c,ρ(n) − RiB,c,ρ(0),                                   (3)
+ 
+-   ∆iA,c,ρ(n) = RiA,c,ρ(n) − RiA,c,ρ(0).                                   (4)
++∆iA,c,ρ(n) = RiA,c,ρ(n) − RiA,c,ρ(0).                                   (4)
+ 
+ A positive new-condition change indicates improved return within the tested
+ budget. A negative old-condition change indicates a loss in measured clean-
+@@ -296,37 +335,36 @@ performance. The three training seeds, rather than their repeated evaluation
+ episodes or descendant branches, are the replication units. We retain every seed
+ and report descriptive means and ranges. Shaded ranges in figures are not con-
+ fidence intervals.
+-
+-2.5 Implementation Verification and Evidence Capture
+-
+-Eleven behavioral tests check sensor corruption, timing, random-stream separa-
+-tion, replay boundaries, masking, parameter updates, and positional support. A
+-real MuJoCo test applies identical commands under clean, noisy, and delayed
+-observations and requires identical underlying states and rewards. This verifies
+-                    Adaptation and Retention under Sensor Faults  7
++8  Anonymous submission
+ 
+ Table 2. Fixed-budget pilot outcomes, averaged equally across three source seeds.
+ B(0) and B(4000) are new-condition returns before and after adaptation; ∆A is the
+ old clean-condition return change. Returns are not success percentages.
+ 
+-Controller   Fault  ρ    B(0)    B(4000)                          ∆A
++Controller   Fault       ρ    B(0)    B(4000)  ∆A
+ 
+-Transformer  Noise  0    2433.7  2130.1                            −320.9
+-                                 2105.1                            −272.4
+-Transformer  Noise  0.5  2433.7                                    −825.4
+-                                    12.6                           −145.2
+-Transformer  Delay  0    -85.5     -75.3                           −641.2
+-                                 2369.7                            −339.0
+-Transformer  Delay  0.5  -85.5   2727.3                           −1158.9
+-                                  203.4                            −383.9
+-Reactive     Noise  0    2875.5     47.9
++Transformer  Noise       0    2433.7  2130.1    −320.9
++                                      2105.1    −272.4
++Transformer  Noise       0.5  2433.7            −825.4
++                                         12.6   −145.2
++Transformer  Delay       0    -85.5     -75.3   −641.2
++                                      2369.7    −339.0
++Transformer  Delay       0.5  -85.5   2727.3   −1158.9
++                                       203.4    −383.9
++Reactive     Noise       0    2875.5     47.9
+ 
+-Reactive     Noise  0.5  2875.5
++Reactive     Noise       0.5  2875.5
+ 
+-Reactive     Delay  0    -180.3
++Reactive     Delay       0    -180.3
+ 
+-Reactive     Delay  0.5  -180.3
++Reactive     Delay       0.5  -180.3
++
++2.5 Implementation Verification and Evidence Capture
+ 
++Eleven behavioral tests check sensor corruption, timing, random-stream separa-
++tion, replay boundaries, masking, parameter updates, and positional support. A
++real MuJoCo test applies identical commands under clean, noisy, and delayed
++observations and requires identical underlying states and rewards. This verifies
+ that the intervention acts on sensing. A separate short execution check exercises
+ all eight architecture/fault/replay combinations using reduced horizons; those
+ returns are excluded from the pilot analysis.
+@@ -352,6 +390,7 @@ evaluation returns. The complete study, including clean replay collection, evalu
+ tion, checkpoint writing, and initialization, took 1,463.8 seconds on the recorded
+ machine. Table 2 gives the equally weighted mean over the three source seeds;
+ returns are environment reward sums, not completion rates.
++Adaptation and Retention under Sensor Faults  9
+ 
+     The initial clean-condition means were 2,677.9 (transformer) and 3,328.1
+ (reactive). The zero-step sensor conditions differed substantially. Mean noise-
+@@ -360,17 +399,49 @@ controller. Under the three-step delay, the corresponding means were −85.5 and
+ −180.3. These are measurements after applying the sensor intervention and be-
+ fore continued training. Different initial performance and source-policy quality
+ constrain cross-controller interpretation.
+-8         Anonymous submission
+ 
+ 3.2 Adaptation under Noise and Delay
+ 
+-Figure 1 shows the fixed-budget learning curves. Under noise, mean return
++Figure 2 shows the fixed-budget learning curves. Under noise, mean return
+ declined for both controllers with either replay strategy. Transformer return
+ changed by −303.7 without retained replay and −328.7 with it. Reactive return
+ changed by −505.8 and −148.2, respectively. Thus, continued training did not
+ yield a mean noise-condition improvement within this budget, even though the
+ reactive retained-replay arm declined less.
+ 
++    Delay produced positive mean changes but substantial variation. Without
++retained replay, the transformer gained 98.1 return units and the reactive con-
++troller gained 383.7. With retained replay, the corresponding gains were 10.2
++and 228.2. The transformer’s no-replay seed-level changes ranged from −197.9
++to +428.8; its retained-replay changes ranged from −38.4 to +105.4. Only two
++of three transformer seeds improved without replay, and one of three improved
++with replay. All three reactive seeds improved under delay in both replay vari-
++ants. These counts describe this pilot’s realized seed outcomes, not estimated
++population success probabilities.
++
++    The trapezoidal mean return across the sampled learning curve was −27.8
++without replay and −82.6 with replay for transformer delay, compared with 51.2
++and −89.8 for reactive delay. This summary includes intermediate deterioration
++that a final-point comparison would hide. It does not establish a recovery time
++because no recovery threshold was specified.
++
++3.3 Retention and Paired Replay Effects
++
++Every branch had a negative clean-condition change at the final budget (Fig. 3).
++For transformer delay, the mean loss was 825.4 without retained replay and 145.2
++with replay. For reactive delay, it was 1,158.9 and 383.9. The corresponding noise-
++condition adaptation branches lost 320.9 versus 272.4 for the transformer and
++641.2 versus 339.0 for the reactive controller.
++
++    Retained replay increased final clean-condition return relative to the paired
++no-replay branch in ten of twelve seed/controller/fault pairs. Its mean effect on
++clean return was positive in all four controller/fault comparisons. This was not
++uniform at the seed level: transformer seed 43 under noise and seed 42 under
++delay retained less with replay. For both controllers, all three delay seeds ended
++with lower delay-condition return under retained replay than under no replay.
++The paired comparison therefore exposes a cost in new-condition performance
++10        Anonymous submission
++
+                    Transformer / noise                               Transformer / delay
+ 
+           2750                                          200
+@@ -407,53 +478,11 @@ B return  2500                                B return
+ 
+                       0% retained                       50% retained
+ 
+-Fig. 1. New-condition return during continued training. Lines are means over three
++Fig. 2. New-condition return during continued training. Lines are means over three
+ source seeds; shaded bands are their minimum–maximum ranges, not confidence in-
+ tervals. Small points at the final budget show individual seed means. Evaluation uses
+ three deterministic episodes per seed and condition.
+-
+-    Delay produced positive mean changes but substantial variation. Without
+-retained replay, the transformer gained 98.1 return units and the reactive con-
+-troller gained 383.7. With retained replay, the corresponding gains were 10.2
+-Adaptation and Retention under Sensor Faults  9
+-
+-and 228.2. The transformer’s no-replay seed-level changes ranged from −197.9
+-to +428.8; its retained-replay changes ranged from −38.4 to +105.4. Only two
+-of three transformer seeds improved without replay, and one of three improved
+-with replay. All three reactive seeds improved under delay in both replay vari-
+-ants. These counts describe this pilot’s realized seed outcomes, not estimated
+-population success probabilities.
+-
+-    The trapezoidal mean return across the sampled learning curve was −27.8
+-without replay and −82.6 with replay for transformer delay, compared with 51.2
+-and −89.8 for reactive delay. This summary includes intermediate deterioration
+-that a final-point comparison would hide. It does not establish a recovery time
+-because no recovery threshold was specified.
+-
+-3.3 Retention and Paired Replay Effects
+-
+-Every branch had a negative clean-condition change at the final budget (Fig. 2).
+-For transformer delay, the mean loss was 825.4 without retained replay and 145.2
+-with replay. For reactive delay, it was 1,158.9 and 383.9. The corresponding noise-
+-condition adaptation branches lost 320.9 versus 272.4 for the transformer and
+-641.2 versus 339.0 for the reactive controller.
+-
+-    Retained replay increased final clean-condition return relative to the paired
+-no-replay branch in ten of twelve seed/controller/fault pairs. Its mean effect on
+-clean return was positive in all four controller/fault comparisons. This was not
+-uniform at the seed level: transformer seed 43 under noise and seed 42 under
+-delay retained less with replay. For both controllers, all three delay seeds ended
+-with lower delay-condition return under retained replay than under no replay.
+-The paired comparison therefore exposes a cost in new-condition performance
+-alongside improved average retention under delay. Neither arm preserved its own
+-initial clean performance.
+-
+-    Mean collection-and-optimization time per branch ranged from 55.1 to 75.0
+-seconds across transformer conditions and from 34.9 to 38.3 seconds across re-
+-active conditions. Those times exclude evaluation and checkpoint I/O. They
+-describe this implementation and machine load; they do not establish equal
+-computational budgets or a generally faster adaptation algorithm.
+-10               Anonymous submission
++                              Adaptation and Retention under Sensor Faults                                 11
+ 
+                                Transformer / noise                                    Transformer / delay
+ 
+@@ -485,11 +514,20 @@ A return change  −250                                  A return change
+ 
+                            0% retained                                  50% retained
+ 
+-Fig. 2. Clean-condition retention measured with the actual updated model. Zero is
++Fig. 3. Clean-condition retention measured with the actual updated model. Zero is
+ each branch’s own initial clean-condition return. Negative values indicate loss of earlier
+ measured performance. Lines and shaded ranges summarize three source seeds; the
+ ranges are not confidence intervals.
+-              Adaptation and Retention under Sensor Faults  11
++12  Anonymous submission
++
++alongside improved average retention under delay. Neither arm preserved its own
++initial clean performance.
++
++    Mean collection-and-optimization time per branch ranged from 55.1 to 75.0
++seconds across transformer conditions and from 34.9 to 38.3 seconds across re-
++active conditions. Those times exclude evaluation and checkpoint I/O. They
++describe this implementation and machine load; they do not establish equal
++computational budgets or a generally faster adaptation algorithm.
+ 
+ 4 Discussion
+ 
+@@ -531,6 +569,8 @@ to evaluate old and new conditions together.
+ 
+ The source checkpoints were trained with actuator perturbations, and the clean
+ condition is an evaluation setting rather than a newly optimized clean-only
++Adaptation and Retention under Sensor Faults  13
++
+ task. Adapting these models may differ from training a sensor-aware agent from
+ scratch. Optimizers and entropy temperature are reinitialized; this may itself
+ influence continued learning. The current pilot cannot separate that effect from
+@@ -541,8 +581,6 @@ move the limitation.
+     The retained pool contains only two deterministic clean episodes per model.
+ It covers a narrow part of the old state distribution and contains no explicit
+ behavioral-cloning or feature-preservation loss. Half of a batch drawn from this
+-12  Anonymous submission
+-
+ pool is a particular rehearsal strategy, not a general guarantee of retention.
+ The two architectures also differ in capacity, input processing, and pretraining
+ outcomes. Three seeds and three fixed evaluation episodes per condition provide
+@@ -582,14 +620,14 @@ of future learning.
+ 
+ We implemented actual sensor noise and observation delay, aligned transformer
+ history support, and completed a paired pilot of continued SAC training with
++14  Anonymous submission
++
+ explicit retention measurements. Across three pretrained seeds per controller,
+ retained replay reduced average clean-condition loss in every controller/fault
+ comparison but did not eliminate it. Under delay, improved average retention
+ accompanied smaller new-condition gains; under noise, mean new-condition per-
+ formance declined in all variants. These findings do not establish fast adaptation
+ without forgetting. They identify the tradeoff exhibited by this configuration and
+-Adaptation and Retention under Sensor Faults  13
+-
+ motivate longer, controlled studies of replay coverage, explicit retention objec-
+ tives, and continued-learning stability.
+ 
+@@ -600,10 +638,12 @@ search architecture and algorithms. OpenAI Codex assisted manuscript restruc-
+ turing, primary-source lookup, formatting, code inspection, implementation and
+ testing of the sensor-fault pilot, experiment orchestration, result verification, and
+ preparation of analysis and plotting scripts. The reported observations were gen-
+-erated by executed simulator runs; tables and figures are computed from saved
+-run records. Generative AI was not used to invent experimental observations.
+-The authors remain responsible for the implementation, source verification, anal-
+-ysis, interpretation, and final manuscript.
++erated by executed simulator runs; tables and result plots are computed from
++saved run records. The workflow diagram summarizes the implemented pilot,
++and its TrackMania panel is a saved development screenshot. Generative AI was
++not used to invent experimental observations. The authors remain responsible
++for the implementation, source verification, analysis, interpretation, and final
++manuscript.
+ 
+ References
+ 
+@@ -633,6 +673,7 @@ References
+      ing for adaptive agents. In: International Conference on Learning Representations
+      (2024), https://proceedings.iclr.cc/paper_files/paper/2024/hash/7204434dcb938
+      3a1454dc1e97e58ea9c-Abstract-Conference.html
++Adaptation and Retention under Sensor Faults  15
+ 
+  7. Grigsby, J., Sasek, J., Parajuli, S., Adebi, D., Zhang, A., Zhu, Y.: AMAGO-
+      2: Breaking the multi-task barrier in meta-reinforcement learning with trans-
+@@ -644,7 +685,6 @@ References
+      of the 35th International Conference on Machine Learning. Proceedings of Machine
+      Learning Research, vol. 80, pp. 1861–1870 (2018), https://proceedings.mlr.press/
+      v80/haarnoja18b.html
+-14  Anonymous submission
+ 
+  9. Hiraoka, T., Imagawa, T., Hashimoto, T., Onishi, T., Tsuruoka, Y.: Dropout Q-
+      functions for doubly efficient reinforcement learning. In: International Conference
+diff --git a/scripts/benchmark_fault_env.py b/scripts/benchmark_fault_env.py
+index 1401b25ca..7cd4a715a 100644
+--- a/scripts/benchmark_fault_env.py
++++ b/scripts/benchmark_fault_env.py
+@@ -235,6 +235,11 @@ class FaultInjectionWrapper(gym.Wrapper):
+             return 0
+ 
+ 
++# Per-environment construction options. Ant-v5 excludes the 78 external contact-force
++# coordinates (27-dim observation), the common low-dimensional Ant benchmark setting.
++ENV_KWARGS = {"Ant-v5": {"include_cfrc_ext_in_observation": False}}
++
++
+ def make_fault_env(
+     env_id: str = "HalfCheetah-v5",
+     split: str = "train",
+@@ -242,7 +247,7 @@ def make_fault_env(
+     seed: Optional[int] = None,
+ ) -> gym.Env:
+     """Factory function for creating wrapped fault-injected environments."""
+-    base_env = gym.make(env_id)
++    base_env = gym.make(env_id, **ENV_KWARGS.get(env_id, {}))
+     return FaultInjectionWrapper(base_env, split=split, fixed_fault=fixed_fault, seed=seed)
+ 
+ 
+diff --git a/scripts/confirmatory_logging.py b/scripts/confirmatory_logging.py
+index b5318f295..74943bdf6 100644
+--- a/scripts/confirmatory_logging.py
++++ b/scripts/confirmatory_logging.py
+@@ -43,8 +43,11 @@ def get_git_diff(repo_root: Path) -> str:
+             cwd=str(repo_root),
+             capture_output=True,
+             text=True,
++            encoding="utf-8",
++            errors="replace",
+         )
+-        return res.stdout
++        # On Windows a decode failure in the reader thread leaves stdout as None.
++        return res.stdout or ""
+     except Exception:
+         return ""
+ 

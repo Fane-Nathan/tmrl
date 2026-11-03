@@ -1,0 +1,9 @@
+{
+  "source_capture": "output\\icodit_2026\\camera_ready\\trackmania_development_capture.png",
+  "source_capture_sha256": "eda5ee3b25112f36d14dc3133082de7cd5a31256e0bd8c513f516ae367065ecf",
+  "embedded_capture_sha256": "eda5ee3b25112f36d14dc3133082de7cd5a31256e0bd8c513f516ae367065ecf",
+  "capture_context": "Camera-pipeline preflight, recorded 2026-09-12; no controls sent by the profiler.",
+  "capture_modified": false,
+  "figure_kind": "Schematic with an existing screenshot; no new experimental observations.",
+  "experimental_panel": "Executed camera-ready study: HalfCheetah-v5 and Ant-v5, 8 source seeds x 2 controllers, 5 branches each."
+}

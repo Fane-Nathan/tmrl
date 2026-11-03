@@ -1,0 +1,35 @@
+\begin{table}[t]
+\caption{Outcomes at 20,000 steps: mean over eight source seeds with 95\% $t$ intervals. $B(0)$ is the zero-step sensor-condition return; $\Delta B$ and $\Delta A$ are the changes in sensor- and clean-condition return. For the clean control, $B=A$.}
+\label{tab:outcomes}
+\centering\scriptsize
+\setlength{\tabcolsep}{3pt}
+\begin{tabular*}{\textwidth}{@{\extracolsep{\fill}}llrrrr@{}}
+\toprule
+Controller & Fault & $\rho$ & $B(0)$ & $\Delta B$ [95\% CI] & $\Delta A$ [95\% CI] \\
+\midrule
+\multicolumn{6}{@{}l}{\emph{HalfCheetah-v5}} \\
+Transformer & Noise & 0 & 2{,}402 & +89 [\ensuremath{-}163, 341] & +59 [\ensuremath{-}104, 222] \\
+Transformer & Noise & 0.5 & 2{,}402 & +125 [\ensuremath{-}96, 346] & +59 [14, 104] \\
+Transformer & Delay & 0 & 13 & \ensuremath{-}115 [\ensuremath{-}259, 28] & \ensuremath{-}2{,}496 [\ensuremath{-}2{,}852, \ensuremath{-}2{,}139] \\
+Transformer & Delay & 0.5 & 13 & \ensuremath{-}69 [\ensuremath{-}130, \ensuremath{-}9] & \ensuremath{-}1{,}173 [\ensuremath{-}1{,}846, \ensuremath{-}500] \\
+Transformer & Clean control & 0 & 2{,}695 & --- & +782 [606, 958] \\
+Reactive & Noise & 0 & 2{,}900 & \ensuremath{-}443 [\ensuremath{-}546, \ensuremath{-}339] & \ensuremath{-}550 [\ensuremath{-}748, \ensuremath{-}352] \\
+Reactive & Noise & 0.5 & 2{,}900 & \ensuremath{-}91 [\ensuremath{-}230, 47] & \ensuremath{-}157 [\ensuremath{-}339, 26] \\
+Reactive & Delay & 0 & \ensuremath{-}179 & +689 [373, 1{,}006] & \ensuremath{-}1{,}390 [\ensuremath{-}1{,}896, \ensuremath{-}884] \\
+Reactive & Delay & 0.5 & \ensuremath{-}179 & +406 [153, 658] & +16 [\ensuremath{-}233, 266] \\
+Reactive & Clean control & 0 & 3{,}239 & --- & +963 [740, 1{,}187] \\
+\addlinespace[2pt]
+\multicolumn{6}{@{}l}{\emph{Ant-v5}} \\
+Transformer & Noise & 0 & 921 & +7 [\ensuremath{-}46, 61] & +27 [\ensuremath{-}37, 90] \\
+Transformer & Noise & 0.5 & 921 & +22 [\ensuremath{-}40, 85] & +34 [\ensuremath{-}38, 105] \\
+Transformer & Delay & 0 & 918 & \ensuremath{-}30 [\ensuremath{-}110, 50] & \ensuremath{-}12 [\ensuremath{-}83, 59] \\
+Transformer & Delay & 0.5 & 918 & +6 [\ensuremath{-}60, 72] & +22 [\ensuremath{-}58, 102] \\
+Transformer & Clean control & 0 & 899 & --- & \ensuremath{-}64 [\ensuremath{-}187, 60] \\
+Reactive & Noise & 0 & 651 & \ensuremath{-}16 [\ensuremath{-}338, 305] & \ensuremath{-}24 [\ensuremath{-}341, 293] \\
+Reactive & Noise & 0.5 & 651 & +57 [\ensuremath{-}159, 274] & +125 [1, 250] \\
+Reactive & Delay & 0 & 588 & \ensuremath{-}156 [\ensuremath{-}562, 251] & \ensuremath{-}100 [\ensuremath{-}393, 194] \\
+Reactive & Delay & 0.5 & 588 & +64 [\ensuremath{-}211, 339] & +27 [\ensuremath{-}185, 239] \\
+Reactive & Clean control & 0 & 674 & --- & \ensuremath{-}98 [\ensuremath{-}376, 180] \\
+\bottomrule
+\end{tabular*}
+\end{table}

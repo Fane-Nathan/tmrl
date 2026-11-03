@@ -43,8 +43,11 @@ def get_git_diff(repo_root: Path) -> str:
             cwd=str(repo_root),
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
         )
-        return res.stdout
+        # On Windows a decode failure in the reader thread leaves stdout as None.
+        return res.stdout or ""
     except Exception:
         return ""
 

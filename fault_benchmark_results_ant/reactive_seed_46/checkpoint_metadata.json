@@ -1,0 +1,9 @@
+{
+  "seed": 46,
+  "best_iteration": 40,
+  "best_val_score": 512.2277972269987,
+  "checkpoint_sha256": "81cf4de7278082063e0dacba10288693efc269402d536e8dbc1e302d3fb6ded0",
+  "frozen_timestamp": "2026-10-31 20:15:24",
+  "selection_rule": "argmax_validation_score",
+  "validation_split": "unseen parameters of action_scale & action_noise"
+}
