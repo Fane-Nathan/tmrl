@@ -1,0 +1,25 @@
+# JAX plus headless TMRL trainer dependencies for the WSL2 CUDA environment.
+#
+# Install from WSL2 with:
+#   uv pip install --python /home/$USER/.venvs/tmrl-jax-cuda13/bin/python \
+#     -r requirements/continual-jax-wsl2.txt
+#
+# JAX CUDA wheels are Linux-only. CUDA 13 requires an NVIDIA Linux driver
+# interface compatible with driver 580 or newer; the Windows host driver is
+# exposed to WSL2 and must not be reinstalled inside the distribution.
+jax[cuda13]==0.11.1
+flax==0.12.9
+optax==0.2.8
+gymnasium==1.3.0
+numpy>=2.0,<3.0
+pandas>=2.2,<4.0
+rtgym>=0.13,<1.0
+requests>=2.31,<3.0
+tlspyo>=0.2.5,<1.0
+opencv-python-headless>=4.10,<5.0
+mss>=9.0,<11.0
+pyyaml>=6.0,<7.0
+pyinstrument>=5.0,<6.0
+chardet>=5.0,<6.0
+packaging>=24.0
+cloudpickle>=3.0,<4.0

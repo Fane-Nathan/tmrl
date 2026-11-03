@@ -1,0 +1,10 @@
+# Versions used for the ICoDiT 2026 Paper 193 results
+# (Python 3.12.10, Windows 11, NVIDIA GeForce RTX 5070 Laptop GPU, CUDA 12.8).
+# For GPU use, install the CUDA 12.8 build of torch from the PyTorch index.
+torch==2.11.0
+gymnasium[mujoco]==1.3.0
+mujoco==3.12.0
+numpy==2.5.1
+scipy==1.18.0
+matplotlib==3.11.1
+psutil==7.2.2

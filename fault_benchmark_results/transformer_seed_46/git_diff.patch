@@ -1,0 +1,3192 @@
+diff --git a/setup.py b/setup.py
+index 6206a58..7d78061 100644
+--- a/setup.py
++++ b/setup.py
+@@ -126,12 +126,14 @@ install_req = [
+     'cloudpickle',
+     'jax',
+     'jaxlib',
+-    'flax'
++    'flax',
++    'optax'
+ ]
+ 
+ # Dependencies for the TrackMania pipeline
+ if platform.system() == "Windows":
+     install_req.append('pywin32>=303')
++    install_req.append('dxcam>=0.3.0')
+     install_req.append('vgamepad')
+ elif platform.system() == "Linux":
+     install_req.append('mss')
+diff --git a/tmrl/__init__.py b/tmrl/__init__.py
+index b02d2c6..2894cc2 100644
+--- a/tmrl/__init__.py
++++ b/tmrl/__init__.py
+@@ -25,13 +25,27 @@ if platform.system() == "Windows":
+             \nPlease install pywin32 manually.")
+             raise RuntimeError("Please install pywin32 manually: https://github.com/mhammond/pywin32")
+ 
+-# TMRL folder initialization:
+-from tmrl.tools.init_package.init_tmrl import TMRL_FOLDER
++__all__ = ("TMRL_FOLDER", "GenericGymEnv", "CONFIG_DICT", "get_environment")
+ 
+-# do not remove this
+ 
+-from tmrl.core.envs import GenericGymEnv
+-from tmrl.config.config_objects import CONFIG_DICT
++def __getattr__(name):
++    """Load TrackMania runtime state only when the public API needs it."""
++
++    if name == "TMRL_FOLDER":
++        from tmrl.tools.init_package.init_tmrl import TMRL_FOLDER
++
++        return TMRL_FOLDER
++    if name == "GenericGymEnv":
++        from tmrl.core.envs import GenericGymEnv
++
++        return GenericGymEnv
++    if name == "CONFIG_DICT":
++        from tmrl.tools.init_package.init_tmrl import TMRL_FOLDER as _tmrl_folder
++        from tmrl.config.config_objects import CONFIG_DICT
++
++        del _tmrl_folder
++        return CONFIG_DICT
++    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+ 
+ 
+ def get_environment():
+@@ -41,5 +55,13 @@ def get_environment():
+     Returns:
+         gymnasium.Env: An instance of the default TMRL Gymnasium environment
+     """
++    from tmrl.tools.init_package.init_tmrl import TMRL_FOLDER as _tmrl_folder
+     import tmrl.config.config_constants as cfg
++    from tmrl.custom.tm.utils.window import preinitialize_dxcam_capture
++
++    preinitialize_dxcam_capture()
++    from tmrl.config.config_objects import CONFIG_DICT
++    from tmrl.core.envs import GenericGymEnv
++
++    del _tmrl_folder
+     return GenericGymEnv(id=cfg.RTGYM_VERSION, gym_kwargs={"config": CONFIG_DICT})
+diff --git a/tmrl/__main__.py b/tmrl/__main__.py
+index c6c6abb..f4b13b4 100644
+--- a/tmrl/__main__.py
++++ b/tmrl/__main__.py
+@@ -1,9 +1,27 @@
+ import json
+ import logging
++import sys
+ import time
+ from argparse import ArgumentParser, ArgumentTypeError
+ 
++from tmrl.tools.init_package.init_tmrl import TMRL_FOLDER as _TMRL_FOLDER
+ import tmrl.config.config_constants as cfg
++
++# Desktop Duplication must be created before importing the torch-dependent
++# configuration graph on hybrid-GPU Windows systems.
++_CAPTURE_COMMANDS = {
++    "--worker",
++    "--expert",
++    "--test",
++    "--benchmark",
++    "--check-environment",
++    "--record-reward",
++}
++if any(argument in _CAPTURE_COMMANDS for argument in sys.argv[1:]):
++    from tmrl.custom.tm.utils.window import preinitialize_dxcam_capture
++
++    preinitialize_dxcam_capture()
++
+ import tmrl.config.config_objects as cfg_obj
+ 
+ from tmrl.core.envs import GenericGymEnv
+@@ -24,17 +42,26 @@ def main(args):
+         config_modifiers = args.config
+         for k, v in config_modifiers.items():
+             config[k] = v
++        worker_device = (
++            str(cfg_obj.FOUNDATION_CONFIG.get("WORKER_DEVICE", "cpu"))
++            if cfg_obj.IS_JAX_DREAMER
++            else "cuda"
++            if cfg.CUDA_INFERENCE
++            else "cpu"
++        )
+         rw = RolloutWorker(env_cls=partial(GenericGymEnv, id=cfg.RTGYM_VERSION, gym_kwargs={"config": config}),
+                            actor_module_cls=cfg_obj.POLICY,
+                            sample_compressor=cfg_obj.SAMPLE_COMPRESSOR,
+-                           device='cuda' if cfg.CUDA_INFERENCE else 'cpu',
++                           device=worker_device,
+                            server_ip=cfg.SERVER_IP_FOR_WORKER,
+                            max_samples_per_episode=cfg.RW_MAX_SAMPLES_PER_EPISODE,
+                            model_path=cfg.MODEL_PATH_WORKER,
+                            obs_preprocessor=cfg_obj.OBS_PREPROCESSOR,
+                            crc_debug=cfg.CRC_DEBUG,
+                            standalone=args.test)
+-        if args.worker:
++        if args.test:
++            rw.run_episodes(10000)
++        elif args.worker:
+             rw.run()
+         elif args.expert:
+             rw.run(expert=True)
+@@ -51,6 +78,44 @@ def main(args):
+                           load_run_instance_fn=cfg_obj.LOAD_RUN_INSTANCE_FN,
+                           updater_fn=cfg_obj.UPDATER_FN)
+         logging.info(f"--- NOW RUNNING {cfg_obj.ALG_NAME} on TrackMania ---")
++        if cfg_obj.IS_JAX_DREAMER:
++            dreamer = cfg_obj.CONTINUAL_DREAMER_CONFIG
++            logging.info(
++                "M1 JAX Dreamer foundation is enabled: replay sequences=%s, "
++                "batch=%s, warm-up=%s, imagination horizon=%s. Dynamic experts, "
++                "protected replay, consolidation, and AZR remain disabled.",
++                dreamer.get("SEQUENCE_LENGTH", 16),
++                dreamer.get("BATCH_SIZE", 8),
++                dreamer.get("WARMUP_STEPS", 2000),
++                dreamer.get("HORIZON", 8),
++            )
++        elif cfg_obj.ALG_NAME == "DREAMER":
++            dreamer = cfg_obj.DREAMER_CONFIG
++            logging.info(
++                "Recurrent Dreamer control is enabled: replay sequences=%s, "
++                "batch=%s, warm-up=%s, imagination horizon=%s. The broadcast "
++                "actor contains the encoder, RSSM filter, and latent policy.",
++                dreamer.get("SEQUENCE_LENGTH", 16),
++                dreamer.get("BATCH_SIZE", 8),
++                dreamer.get("WARMUP_STEPS", 2000),
++                dreamer.get("HORIZON", 8),
++            )
++            if cfg_obj.USE_AZR_IMAGINATION:
++                logging.info(
++                    "AZR latent tasks are connected as prioritized Dreamer "
++                    "imagination start states (attempts=%s, proposal interval=%s).",
++                    cfg_obj.AZR_CONFIG.get("SOLVER_ATTEMPTS", 4),
++                    cfg_obj.AZR_CONFIG.get("PROPOSAL_INTERVAL", 8),
++                )
++        elif cfg_obj.USE_AZR_IMAGINATION:
++            azr = cfg_obj.AZR_CONFIG
++            logging.info(
++                "AZR imagination is enabled: real-replay warm-up=%s, horizon=%s, "
++                "solver attempts=%s. Imagined updates will target the broadcast actor.",
++                azr.get("WARMUP_STEPS", 1000),
++                azr.get("HORIZON", 3),
++                azr.get("SOLVER_ATTEMPTS", 8),
++            )
+         if args.wandb:
+             trainer.run_with_wandb(entity=cfg.WANDB_ENTITY,
+                                    project=cfg.WANDB_PROJECT,
+diff --git a/tmrl/config/config_constants.py b/tmrl/config/config_constants.py
+index fe473a1..f11a6b1 100644
+--- a/tmrl/config/config_constants.py
++++ b/tmrl/config/config_constants.py
+@@ -8,6 +8,8 @@ import json
+ import platform
+ from packaging import version
+ 
++os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
++
+ 
+ __compatibility__ = "0.6.0"
+ 
+@@ -77,6 +79,9 @@ WINDOW_HEIGHT = ENV_CONFIG["WINDOW_HEIGHT"]
+ GRAYSCALE = ENV_CONFIG["IMG_GRAYSCALE"] if "IMG_GRAYSCALE" in ENV_CONFIG else False
+ IMG_WIDTH = ENV_CONFIG["IMG_WIDTH"] if "IMG_WIDTH" in ENV_CONFIG else 64
+ IMG_HEIGHT = ENV_CONFIG["IMG_HEIGHT"] if "IMG_HEIGHT" in ENV_CONFIG else 64
++CAPTURE_BACKEND = ENV_CONFIG.get("CAPTURE_BACKEND", "gdi")
++CAPTURE_FPS = int(ENV_CONFIG.get("CAPTURE_FPS", 60))
++CAPTURE_KEEP_ON_TOP = bool(ENV_CONFIG.get("CAPTURE_KEEP_ON_TOP", False))
+ LINUX_X_OFFSET = ENV_CONFIG["LINUX_X_OFFSET"] if "LINUX_X_OFFSET" in ENV_CONFIG else 64
+ LINUX_Y_OFFSET = ENV_CONFIG["LINUX_Y_OFFSET"] if "LINUX_Y_OFFSET" in ENV_CONFIG else 70
+ IMG_SCALE_CHECK_ENV = ENV_CONFIG["IMG_SCALE_CHECK_ENV"] if "IMG_SCALE_CHECK_ENV" in ENV_CONFIG else 1.0
+diff --git a/tmrl/config/config_objects.py b/tmrl/config/config_objects.py
+index 877a226..8b1ef32 100644
+--- a/tmrl/config/config_objects.py
++++ b/tmrl/config/config_objects.py
+@@ -25,27 +25,157 @@ from tmrl.custom.tm.tm_gym_interfaces import TM2020Interface, TM2020InterfaceLid
+ from tmrl.custom.tm.tm_preprocessors import obs_preprocessor_tm_act_in_obs, obs_preprocessor_tm_lidar_act_in_obs, obs_preprocessor_tm_lidar_progress_act_in_obs
+ 
+ # custom (torch dependent)
+-from tmrl.custom.torch.custom_memories import ArrayTorchMemoryTMFull, MemoryTMLidar, MemoryTMLidarProgress, get_local_buffer_sample_lidar, get_local_buffer_sample_lidar_progress, get_local_buffer_sample_tm20_imgs
++from tmrl.custom.torch.custom_memories import ArrayTorchMemoryTMFull, ArrayTorchMemoryTMFullSequence, MemoryTMLidar, MemoryTMLidarProgress, get_local_buffer_sample_lidar, get_local_buffer_sample_lidar_progress, get_local_buffer_sample_tm20_imgs
+ from tmrl.custom.torch.custom_models import SquashedGaussianMLPActor, MLPActorCritic, REDQMLPActorCritic, RNNActorCritic, SquashedGaussianRNNActor, SquashedGaussianVanillaCNNActor, VanillaCNNActorCritic, SquashedGaussianVanillaColorCNNActor, VanillaColorCNNActorCritic, REDQVanillaCNNActorCritic
+-from tmrl.custom.torch.custom_algorithms import SpinupSACAgent as SAC_Agent
++from tmrl.custom.torch.custom_algorithms import DreamSACAgent, SpinupSACAgent
+ from tmrl.custom.torch.custom_algorithms import REDQSACAgent as REDQ_Agent
+-from tmrl.custom.torch.custom_checkpoints import update_run_instance
++from tmrl.custom.torch.custom_checkpoints import update_run_instance, dump_dreamer_run_instance, load_dreamer_run_instance
++from tmrl.custom.torch.dreamer import TorchDreamerActor, TorchDreamerAgent
++from tmrl.custom.torch.poincare_memory import replay_sampler_kwargs_from_config
++from tmrl.custom.torch.foundation_actor import SquashedGaussianFoundationActor, FoundationCNNActorCritic, REDQFoundationCNNActorCritic
+ 
+ 
+ ALG_CONFIG = cfg.TMRL_CONFIG["ALG"]
+ ALG_NAME = ALG_CONFIG["ALGORITHM"]
++DREAMER_CONFIG = ALG_CONFIG.get("DREAMER", {})
++CONTINUAL_DREAMER_CONFIG = ALG_CONFIG.get("CONTINUAL_DREAMER", {})
++FOUNDATION_CONFIG = CONTINUAL_DREAMER_CONFIG.get("FOUNDATION", {})
++IS_TORCH_DREAMER = ALG_NAME == "DREAMER"
++IS_JAX_DREAMER = ALG_NAME == "CONTINUAL_DREAMER_JAX"
++IS_DREAMER = IS_TORCH_DREAMER or IS_JAX_DREAMER
++ACTIVE_DREAMER_CONFIG = (
++    CONTINUAL_DREAMER_CONFIG if IS_JAX_DREAMER else DREAMER_CONFIG
++)
++AZR_CONFIG = ALG_CONFIG.get("AZR_IMAGINATION", {})
++if isinstance(AZR_CONFIG, bool):
++    AZR_CONFIG = {"ENABLED": AZR_CONFIG}
++USE_AZR_IMAGINATION = bool(AZR_CONFIG.get("ENABLED", False))
++USE_EXPERIMENTAL_WORLD_MODEL = bool(
++    ALG_NAME == "SAC"
++    and (ALG_CONFIG.get("EXPERIMENTAL_WORLD_MODEL", False) or USE_AZR_IMAGINATION)
++)
++SAC_Agent = DreamSACAgent if USE_EXPERIMENTAL_WORLD_MODEL else SpinupSACAgent
+ REDQ_N = ALG_CONFIG["REDQ_N"] if "REDQ_N" in ALG_CONFIG else 10
+ DROPOUT_CRITIC = ALG_CONFIG["DROPOUT_CRITIC"] if "DROPOUT_CRITIC" in ALG_CONFIG else 0.0
+ LAYER_NORM_CRITIC = ALG_CONFIG["LAYER_NORM_CRITIC"] if "LAYER_NORM_CRITIC" in ALG_CONFIG else False
+ LAYER_NORM_ACTOR = ALG_CONFIG["LAYER_NORM_ACTOR"] if "LAYER_NORM_ACTOR" in ALG_CONFIG else False
+-assert ALG_NAME in ["SAC", "REDQSAC"], f"Invalid config.json: TMRL has no example pipeline for {ALG_NAME}. config.json defines the default kwargs internal to the TMRL framework: you should avoid tempering with this file when using the TMRL Python library. To implement custom TMRL pipelines, please read the TMRL tutorial on GitHub."
++assert ALG_NAME in ["SAC", "REDQSAC", "DREAMER", "CONTINUAL_DREAMER_JAX"], f"Invalid config.json: TMRL has no example pipeline for {ALG_NAME}. config.json defines the default kwargs internal to the TMRL framework: you should avoid tempering with this file when using the TMRL Python library. To implement custom TMRL pipelines, please read the TMRL tutorial on GitHub."
++if IS_JAX_DREAMER:
++    import numpy as np
++    from gymnasium import spaces
++
++    from tmrl.core.jax.training_offline import NNXTrainingOffline
++    from tmrl.custom.jax.continual_checkpoints import (
++        dump_continual_jax_run_instance,
++        load_continual_jax_run_instance,
++        validate_continual_jax_run_instance,
++    )
++    from tmrl.custom.jax.continual_dreamer import JAXDreamerAgent
++    from tmrl.custom.jax.continual_replay import ArrayJaxMemoryTMFullSequence
++    from tmrl.custom.torch.jax_dreamer_actor import TorchJAXDreamerActor
++
++    assert not USE_AZR_IMAGINATION, (
++        "M1 CONTINUAL_DREAMER_JAX requires AZR_IMAGINATION.ENABLED=false. "
++        "AZR is introduced only after continual retention gates pass."
++    )
++    assert not bool(CONTINUAL_DREAMER_CONFIG.get("EXPERTS", {}).get("ENABLED", False)), (
++        "Dynamic experts are disabled until the deployed JAX foundation passes M1."
++    )
++if USE_EXPERIMENTAL_WORLD_MODEL:
++    assert ALG_NAME == "SAC", "AZR imagination currently requires SAC."
++    assert not cfg.PRAGMA_LIDAR, "AZR imagination currently requires image observations."
++if IS_DREAMER:
++    assert not cfg.PRAGMA_LIDAR, "DREAMER requires image observations."
++    assert cfg.GRAYSCALE, "The compact DREAMER controller currently requires grayscale images."
++    assert not cfg.PRAGMA_RNN, "DREAMER owns its recurrent state; PRAGMA_RNN must stay disabled."
++
++
++DREAM_AGENT_KWARGS = {}
++if USE_EXPERIMENTAL_WORLD_MODEL:
++    DREAM_AGENT_KWARGS = dict(
++        enable_azr_imagination=USE_AZR_IMAGINATION,
++        horizon=int(AZR_CONFIG.get("HORIZON", 3)),
++        lr_world_model=float(AZR_CONFIG.get("LR_WORLD_MODEL", 3e-4)),
++        lr_adversary=float(AZR_CONFIG.get("LR_PROPOSER", 1e-4)),
++        free_nats=float(AZR_CONFIG.get("FREE_NATS", 1.0)),
++        world_model_warmup_steps=int(AZR_CONFIG.get("WARMUP_STEPS", 1000)),
++        solver_attempts=int(AZR_CONFIG.get("SOLVER_ATTEMPTS", 8)),
++        tasks_per_proposal=int(AZR_CONFIG.get("TASKS_PER_PROPOSAL", 8)),
++        task_batch_size=int(AZR_CONFIG.get("TASK_BATCH_SIZE", 8)),
++        task_buffer_capacity=int(AZR_CONFIG.get("TASK_BUFFER_SIZE", 1024)),
++        task_max_age=int(AZR_CONFIG.get("TASK_MAX_AGE", 2000)),
++        task_proposal_interval=int(AZR_CONFIG.get("PROPOSAL_INTERVAL", 4)),
++        imagination_interval=int(AZR_CONFIG.get("IMAGINATION_INTERVAL", 2)),
++        min_task_continuation=float(AZR_CONFIG.get("MIN_CONTINUATION", 0.5)),
++        max_latent_perturbation=float(AZR_CONFIG.get("MAX_PERTURBATION", 0.25)),
++        target_quantile=float(AZR_CONFIG.get("TARGET_QUANTILE", 0.5)),
++        imagination_actor_scale=float(AZR_CONFIG.get("ACTOR_LOSS_SCALE", 0.05)),
++        imagination_reward_clip=float(AZR_CONFIG.get("REWARD_CLIP", 10.0)),
++        imagination_grad_clip=float(AZR_CONFIG.get("GRAD_CLIP", 10.0)),
++        azr_seed=int(AZR_CONFIG.get("SEED", 0)),
++    )
+ 
+ 
+ # MODEL, GYM ENVIRONMENT, REPLAY MEMORY AND TRAINING: ===========
+ 
+ # model:
+ 
+-if cfg.PRAGMA_LIDAR:
++if IS_TORCH_DREAMER:
++    TRAIN_MODEL = None
++    use_foundation = bool(ALG_CONFIG.get("USE_FOUNDATION_ACTOR", True))
++    weights_path = ALG_CONFIG.get("FOUNDATION_WEIGHTS_PATH", "weights/car_brain_1m_curriculum/car_brain_multimodal.pt")
++    POLICY = partial(
++        TorchDreamerActor,
++        latent_dim=int(DREAMER_CONFIG.get("LATENT_DIM", 128)),
++        hidden_dim=int(DREAMER_CONFIG.get("HIDDEN_DIM", 256)),
++        policy_hidden_dim=int(DREAMER_CONFIG.get("POLICY_HIDDEN_DIM", 256)),
++        img_channels=cfg.IMG_HIST_LEN,
++        img_height=cfg.IMG_HEIGHT,
++        img_width=cfg.IMG_WIDTH,
++        use_foundation_encoder=use_foundation,
++        foundation_weights_path=weights_path,
++        freeze_foundation=bool(DREAMER_CONFIG.get("FREEZE_FOUNDATION", True)),
++        foundation_only=bool(DREAMER_CONFIG.get("FOUNDATION_ONLY", True)),
++        foundation_discrete_actions=bool(
++            DREAMER_CONFIG.get("FOUNDATION_DISCRETE_ACTIONS", False)
++        ),
++        foundation_steer_threshold=float(
++            DREAMER_CONFIG.get("FOUNDATION_STEER_THRESHOLD", 0.05)
++        ),
++        residual_scale=float(DREAMER_CONFIG.get("RESIDUAL_SCALE", 0.25)),
++        reload_foundation_on_actor_load=bool(
++            DREAMER_CONFIG.get("RELOAD_FOUNDATION_ON_ACTOR_LOAD", True)
++        ),
++    )
++elif IS_JAX_DREAMER:
++    TRAIN_MODEL = None
++    POLICY = partial(
++        TorchJAXDreamerActor,
++        latent_dim=int(FOUNDATION_CONFIG.get("LATENT_DIM", 128)),
++        hidden_dim=int(FOUNDATION_CONFIG.get("HIDDEN_DIM", 256)),
++        policy_hidden_dim=int(
++            FOUNDATION_CONFIG.get("POLICY_HIDDEN_DIM", 256)
++        ),
++        img_channels=cfg.IMG_HIST_LEN,
++        img_height=cfg.IMG_HEIGHT,
++        img_width=cfg.IMG_WIDTH,
++        encoder_channels=tuple(
++            FOUNDATION_CONFIG.get("ENCODER_CHANNELS", [16, 32, 64, 64])
++        ),
++        realtime_cpu_tuning=bool(
++            FOUNDATION_CONFIG.get("WORKER_REALTIME_CPU_TUNING", True)
++        ),
++        realtime_cpu_threads=int(
++            FOUNDATION_CONFIG.get("WORKER_CPU_THREADS", 8)
++        ),
++        realtime_cpu_affinity_count=int(
++            FOUNDATION_CONFIG.get("WORKER_CPU_AFFINITY_COUNT", 8)
++        ),
++        realtime_high_priority=bool(
++            FOUNDATION_CONFIG.get("WORKER_HIGH_PRIORITY", True)
++        ),
++    )
++elif cfg.PRAGMA_LIDAR:
+     if cfg.PRAGMA_RNN:
+         assert ALG_NAME == "SAC", f"{ALG_NAME} is not implemented here."
+         TRAIN_MODEL = RNNActorCritic
+@@ -60,7 +190,15 @@ if cfg.PRAGMA_LIDAR:
+ else:
+     assert not cfg.PRAGMA_RNN, "RNNs not supported yet"
+     assert ALG_NAME in ["SAC", "REDQSAC"], f"{ALG_NAME} is not implemented here."
+-    if ALG_NAME == "SAC":
++    use_foundation = bool(ALG_CONFIG.get("USE_FOUNDATION_ACTOR", True))
++    if use_foundation:
++        if ALG_NAME == "SAC":
++            TRAIN_MODEL = partial(FoundationCNNActorCritic, critic_dropout=DROPOUT_CRITIC, critic_layer_norm=LAYER_NORM_CRITIC, actor_layer_norm=LAYER_NORM_ACTOR)
++            POLICY = SquashedGaussianFoundationActor
++        else:
++            TRAIN_MODEL = partial(REDQFoundationCNNActorCritic, n=REDQ_N, critic_dropout=DROPOUT_CRITIC, critic_layer_norm=LAYER_NORM_CRITIC, actor_layer_norm=LAYER_NORM_ACTOR)
++            POLICY = SquashedGaussianFoundationActor
++    elif ALG_NAME == "SAC":
+         TRAIN_MODEL = partial(VanillaCNNActorCritic, critic_dropout=DROPOUT_CRITIC, critic_layer_norm=LAYER_NORM_CRITIC, actor_layer_norm=LAYER_NORM_ACTOR) if cfg.GRAYSCALE else VanillaColorCNNActorCritic
+         POLICY = partial(SquashedGaussianVanillaCNNActor, layer_norm=LAYER_NORM_ACTOR) if cfg.GRAYSCALE else SquashedGaussianVanillaColorCNNActor
+     else:
+@@ -110,7 +248,11 @@ SAMPLE_PREPROCESSOR = None
+ 
+ assert not cfg.PRAGMA_RNN, "RNNs not supported yet"
+ 
+-if cfg.PRAGMA_LIDAR:
++if IS_TORCH_DREAMER:
++    MEM = ArrayTorchMemoryTMFullSequence
++elif IS_JAX_DREAMER:
++    MEM = ArrayJaxMemoryTMFullSequence
++elif cfg.PRAGMA_LIDAR:
+     if cfg.PRAGMA_RNN:
+         assert False, "not implemented"
+     else:
+@@ -121,22 +263,130 @@ if cfg.PRAGMA_LIDAR:
+ else:
+     MEM = ArrayTorchMemoryTMFull
+ 
+-MEMORY = partial(MEM,
+-                 memory_size=cfg.TMRL_CONFIG["MEMORY_SIZE"],
+-                 batch_size=cfg.TMRL_CONFIG["BATCH_SIZE"],
+-                 sample_preprocessor=SAMPLE_PREPROCESSOR,
+-                 dataset_path=cfg.DATASET_PATH,
+-                 imgs_obs=cfg.IMG_HIST_LEN,
+-                 act_buf_len=cfg.ACT_BUF_LEN,
+-                 crc_debug=cfg.CRC_DEBUG)
++MEMORY_KWARGS = dict(
++    memory_size=cfg.TMRL_CONFIG["MEMORY_SIZE"],
++    batch_size=(
++        int(ACTIVE_DREAMER_CONFIG.get("BATCH_SIZE", 8))
++        if IS_DREAMER
++        else cfg.TMRL_CONFIG["BATCH_SIZE"]
++    ),
++    sample_preprocessor=SAMPLE_PREPROCESSOR,
++    dataset_path=cfg.DATASET_PATH,
++    imgs_obs=cfg.IMG_HIST_LEN,
++    act_buf_len=cfg.ACT_BUF_LEN,
++    crc_debug=cfg.CRC_DEBUG,
++)
++if IS_DREAMER:
++    MEMORY_KWARGS["sequence_length"] = int(
++        ACTIVE_DREAMER_CONFIG.get("SEQUENCE_LENGTH", 16)
++    )
++    MEMORY_KWARGS.update(
++        replay_sampler_kwargs_from_config(ACTIVE_DREAMER_CONFIG)
++    )
++MEMORY = partial(MEM, **MEMORY_KWARGS)
+ 
+ 
+ # ALGORITHM: ===================================================
+ 
+ 
+-assert ALG_NAME in ["SAC", "REDQSAC"], f"{ALG_NAME} is not implemented here."
++assert ALG_NAME in ["SAC", "REDQSAC", "DREAMER", "CONTINUAL_DREAMER_JAX"], f"{ALG_NAME} is not implemented here."
+ 
+-if ALG_NAME == "SAC":
++if IS_TORCH_DREAMER:
++    use_foundation = bool(ALG_CONFIG.get("USE_FOUNDATION_ACTOR", True))
++    weights_path = ALG_CONFIG.get("FOUNDATION_WEIGHTS_PATH", "weights/car_brain_1m_curriculum/car_brain_multimodal.pt")
++    AGENT = partial(
++        TorchDreamerAgent,
++        device='cuda' if cfg.CUDA_TRAINING else 'cpu',
++        latent_dim=int(DREAMER_CONFIG.get("LATENT_DIM", 128)),
++        hidden_dim=int(DREAMER_CONFIG.get("HIDDEN_DIM", 256)),
++        policy_hidden_dim=int(DREAMER_CONFIG.get("POLICY_HIDDEN_DIM", 256)),
++        reconstruction_size=int(DREAMER_CONFIG.get("RECONSTRUCTION_SIZE", 24)),
++        lr_world_model=float(DREAMER_CONFIG.get("LR_WORLD_MODEL", 3e-4)),
++        lr_actor=float(DREAMER_CONFIG.get("LR_ACTOR", 8e-5)),
++        lr_critic=float(DREAMER_CONFIG.get("LR_CRITIC", 8e-5)),
++        lr_foundation=float(DREAMER_CONFIG.get("LR_FOUNDATION", 0.0)),
++        use_foundation_encoder=use_foundation,
++        foundation_weights_path=weights_path,
++        freeze_foundation=bool(DREAMER_CONFIG.get("FREEZE_FOUNDATION", True)),
++        foundation_only=bool(DREAMER_CONFIG.get("FOUNDATION_ONLY", True)),
++        foundation_discrete_actions=bool(
++            DREAMER_CONFIG.get("FOUNDATION_DISCRETE_ACTIONS", False)
++        ),
++        foundation_steer_threshold=float(
++            DREAMER_CONFIG.get("FOUNDATION_STEER_THRESHOLD", 0.05)
++        ),
++        residual_scale=float(DREAMER_CONFIG.get("RESIDUAL_SCALE", 0.25)),
++        reload_foundation_on_actor_load=bool(
++            DREAMER_CONFIG.get("RELOAD_FOUNDATION_ON_ACTOR_LOAD", True)
++        ),
++        gamma=float(ALG_CONFIG.get("GAMMA", 0.99)),
++        lambda_=float(DREAMER_CONFIG.get("LAMBDA", 0.95)),
++        free_nats=float(DREAMER_CONFIG.get("FREE_NATS", 1.0)),
++        imagination_horizon=int(DREAMER_CONFIG.get("HORIZON", 8)),
++        imagination_batch_size=int(
++            DREAMER_CONFIG.get("IMAGINATION_BATCH_SIZE", 32)
++        ),
++        burn_in=int(DREAMER_CONFIG.get("BURN_IN", 5)),
++        world_model_warmup_steps=int(
++            DREAMER_CONFIG.get("WARMUP_STEPS", 2000)
++        ),
++        entropy_scale=float(DREAMER_CONFIG.get("ENTROPY_SCALE", 3e-4)),
++        target_polyak=float(DREAMER_CONFIG.get("TARGET_POLYAK", 0.99)),
++        grad_clip=float(DREAMER_CONFIG.get("GRAD_CLIP", 100.0)),
++        enable_azr_imagination=USE_AZR_IMAGINATION,
++        lr_adversary=float(AZR_CONFIG.get("LR_PROPOSER", 1e-4)),
++        solver_attempts=int(AZR_CONFIG.get("SOLVER_ATTEMPTS", 4)),
++        tasks_per_proposal=int(AZR_CONFIG.get("TASKS_PER_PROPOSAL", 4)),
++        task_batch_size=int(AZR_CONFIG.get("TASK_BATCH_SIZE", 8)),
++        task_buffer_capacity=int(AZR_CONFIG.get("TASK_BUFFER_SIZE", 1024)),
++        task_max_age=int(AZR_CONFIG.get("TASK_MAX_AGE", 2000)),
++        task_proposal_interval=int(AZR_CONFIG.get("PROPOSAL_INTERVAL", 8)),
++        min_task_continuation=float(
++            AZR_CONFIG.get("MIN_CONTINUATION", 0.5)
++        ),
++        max_latent_perturbation=float(AZR_CONFIG.get("MAX_PERTURBATION", 0.25)),
++        target_quantile=float(AZR_CONFIG.get("TARGET_QUANTILE", 0.5)),
++        azr_seed=int(AZR_CONFIG.get("SEED", 0)),
++    )
++elif IS_JAX_DREAMER:
++    AGENT = partial(
++        JAXDreamerAgent,
++        latent_dim=int(FOUNDATION_CONFIG.get("LATENT_DIM", 128)),
++        hidden_dim=int(FOUNDATION_CONFIG.get("HIDDEN_DIM", 256)),
++        policy_hidden_dim=int(
++            FOUNDATION_CONFIG.get("POLICY_HIDDEN_DIM", 256)
++        ),
++        encoder_channels=tuple(
++            FOUNDATION_CONFIG.get("ENCODER_CHANNELS", [16, 32, 64, 64])
++        ),
++        lr_world_model=float(
++            CONTINUAL_DREAMER_CONFIG.get("LR_WORLD_MODEL", 1e-4)
++        ),
++        lr_actor=float(CONTINUAL_DREAMER_CONFIG.get("LR_ACTOR", 3e-5)),
++        lr_critic=float(CONTINUAL_DREAMER_CONFIG.get("LR_CRITIC", 3e-5)),
++        gamma=float(ALG_CONFIG.get("GAMMA", 0.99)),
++        lambda_=float(CONTINUAL_DREAMER_CONFIG.get("LAMBDA", 0.95)),
++        free_nats=float(CONTINUAL_DREAMER_CONFIG.get("FREE_NATS", 1.0)),
++        imagination_horizon=int(
++            CONTINUAL_DREAMER_CONFIG.get("HORIZON", 8)
++        ),
++        imagination_batch_size=int(
++            CONTINUAL_DREAMER_CONFIG.get("IMAGINATION_BATCH_SIZE", 32)
++        ),
++        burn_in=int(CONTINUAL_DREAMER_CONFIG.get("BURN_IN", 5)),
++        world_model_warmup_steps=int(
++            CONTINUAL_DREAMER_CONFIG.get("WARMUP_STEPS", 2000)
++        ),
++        entropy_scale=float(
++            CONTINUAL_DREAMER_CONFIG.get("ENTROPY_SCALE", 3e-4)
++        ),
++        target_polyak=float(
++            CONTINUAL_DREAMER_CONFIG.get("TARGET_POLYAK", 0.99)
++        ),
++        grad_clip=float(CONTINUAL_DREAMER_CONFIG.get("GRAD_CLIP", 10.0)),
++        seed=int(CONTINUAL_DREAMER_CONFIG.get("SEED", 0)),
++    )
++elif ALG_NAME == "SAC":
+     AGENT = partial(
+         SAC_Agent,
+         device='cuda' if cfg.CUDA_TRAINING else 'cpu',
+@@ -154,7 +404,8 @@ if ALG_NAME == "SAC":
+         betas_actor=ALG_CONFIG["BETAS_ACTOR"] if "BETAS_ACTOR" in ALG_CONFIG else None,
+         betas_critic=ALG_CONFIG["BETAS_CRITIC"] if "BETAS_CRITIC" in ALG_CONFIG else None,
+         l2_actor=ALG_CONFIG["L2_ACTOR"] if "L2_ACTOR" in ALG_CONFIG else None,
+-        l2_critic=ALG_CONFIG["L2_CRITIC"] if "L2_CRITIC" in ALG_CONFIG else None
++        l2_critic=ALG_CONFIG["L2_CRITIC"] if "L2_CRITIC" in ALG_CONFIG else None,
++        **DREAM_AGENT_KWARGS,
+     )
+ else:
+     AGENT = partial(
+@@ -191,9 +442,53 @@ def sac_v2_entropy_scheduler(agent, epoch):
+         agent.entopy_target = start_ent + (end_ent - start_ent) * epoch / end_epoch
+ 
+ 
+-ENV_CLS = partial(GenericGymEnv, id=cfg.RTGYM_VERSION, gym_kwargs={"config": CONFIG_DICT})
++if IS_JAX_DREAMER:
++    # The WSL2 trainer must not initialize the native-Windows TrackMania
++    # interface merely to discover tensor shapes.
++    JAX_OBSERVATION_SPACE = spaces.Tuple(
++        (
++            spaces.Box(0.0, 1000.0, shape=(1,), dtype=np.float32),
++            spaces.Box(0.0, 6.0, shape=(1,), dtype=np.float32),
++            spaces.Box(0.0, np.inf, shape=(1,), dtype=np.float32),
++            spaces.Box(
++                0.0,
++                1.0,
++                shape=(cfg.IMG_HIST_LEN, cfg.IMG_HEIGHT, cfg.IMG_WIDTH),
++                dtype=np.float32,
++            ),
++            *(
++                spaces.Box(-1.0, 1.0, shape=(3,), dtype=np.float32)
++                for _ in range(cfg.ACT_BUF_LEN)
++            ),
++        )
++    )
++    JAX_ACTION_SPACE = spaces.Box(
++        -1.0, 1.0, shape=(3,), dtype=np.float32
++    )
++    ENV_CLS = (JAX_OBSERVATION_SPACE, JAX_ACTION_SPACE)
++else:
++    ENV_CLS = partial(GenericGymEnv, id=cfg.RTGYM_VERSION, gym_kwargs={"config": CONFIG_DICT})
+ 
+-if cfg.PRAGMA_LIDAR:  # lidar
++if IS_JAX_DREAMER:
++    TRAINER = partial(
++        NNXTrainingOffline,
++        env_cls=ENV_CLS,
++        memory_cls=MEMORY,
++        epochs=cfg.TMRL_CONFIG["MAX_EPOCHS"],
++        rounds=cfg.TMRL_CONFIG["ROUNDS_PER_EPOCH"],
++        steps=cfg.TMRL_CONFIG["TRAINING_STEPS_PER_ROUND"],
++        update_model_interval=cfg.TMRL_CONFIG["UPDATE_MODEL_INTERVAL"],
++        update_buffer_interval=cfg.TMRL_CONFIG["UPDATE_BUFFER_INTERVAL"],
++        max_training_steps_per_env_step=cfg.TMRL_CONFIG["MAX_TRAINING_STEPS_PER_ENVIRONMENT_STEP"],
++        profiling=cfg.PROFILE_TRAINER,
++        training_agent_cls=AGENT,
++        agent_scheduler=None,
++        start_training=cfg.TMRL_CONFIG["ENVIRONMENT_STEPS_BEFORE_TRAINING"],
++        device=None,
++        jit_sampling=False,
++        jit_training=False,
++    )
++elif cfg.PRAGMA_LIDAR:  # lidar
+     TRAINER = partial(
+         TorchTrainingOffline,
+         env_cls=ENV_CLS,
+@@ -228,6 +523,24 @@ else:  # images
+ # CHECKPOINTS: ===================================================
+ 
+ 
+-DUMP_RUN_INSTANCE_FN = None if cfg.PRAGMA_LIDAR else None  # dump_run_instance_images_dataset
+-LOAD_RUN_INSTANCE_FN = None if cfg.PRAGMA_LIDAR else None  # load_run_instance_images_dataset
+-UPDATER_FN = update_run_instance if ALG_NAME in ["SAC", "REDQSAC"] else None
++DUMP_RUN_INSTANCE_FN = (
++    dump_continual_jax_run_instance
++    if IS_JAX_DREAMER
++    else dump_dreamer_run_instance
++    if IS_TORCH_DREAMER
++    else None
++)
++LOAD_RUN_INSTANCE_FN = (
++    load_continual_jax_run_instance
++    if IS_JAX_DREAMER
++    else load_dreamer_run_instance
++    if IS_TORCH_DREAMER
++    else None
++)
++UPDATER_FN = (
++    validate_continual_jax_run_instance
++    if IS_JAX_DREAMER
++    else update_run_instance
++    if ALG_NAME in ["SAC", "REDQSAC", "DREAMER"]
++    else None
++)
+diff --git a/tmrl/core/jax/training_offline.py b/tmrl/core/jax/training_offline.py
+index 5b895b5..e5dbda7 100644
+--- a/tmrl/core/jax/training_offline.py
++++ b/tmrl/core/jax/training_offline.py
+@@ -73,7 +73,8 @@ class NNXTrainingOffline(TrainingOffline):
+                  start_training: int = 0,
+                  device: str = None,
+                  jit_sampling: bool = False,
+-                 jit_substeps: int = 1):
++                 jit_substeps: int = 1,
++                 jit_training: bool = True):
+         """
+         Args:
+             env_cls (type): class of a dummy environment, used only to retrieve observation and action spaces if needed. Alternatively, this can be a tuple of the form (observation_space, action_space).
+@@ -92,7 +93,10 @@ class NNXTrainingOffline(TrainingOffline):
+             device (str): device to use (None for automatic)
+             jit_sampling (bool): whether to jit the sampling method from memory_cls with nnx.jit
+             jit_substeps (int): when jit_sampling is true, sampling + training steps are clubbed into jitted blocks of jit_substeps iterations to alleviate python-XLA transfer bottlenecks
++            jit_training (bool): whether to wrap the complete agent.train call in nnx.jit. Set False for agents that dispatch between separately jitted phases on the host.
+         """
++        if jit_sampling and not jit_training:
++            raise ValueError("jit_sampling requires jit_training=True")
+         if jit_sampling:
+             # When jit_sampling is true, every "training step" contains jit_substeps actual training step.
+             # Therefore, the following values must be adapted to remain consistent:
+@@ -116,6 +120,12 @@ class NNXTrainingOffline(TrainingOffline):
+                          device)
+         self.jit_sampling = jit_sampling
+         self.jit_substeps = jit_substeps
++        self.jit_training = jit_training
++
++    def _train_batch(self, batch):
++        if self.jit_training:
++            return _train_jit(batch, self.agent)
++        return self.agent.train(batch)
+         
+     def run_epoch(self, interface):
+         stats = []
+@@ -136,7 +146,7 @@ class NNXTrainingOffline(TrainingOffline):
+                 batch = self.memory.sample()
+ 
+                 t_compile_start = time.perf_counter()
+-                out = _train_jit(batch, self.agent)
++                out = self._train_batch(batch)
+                 t_compile_end = time.perf_counter()
+ 
+             else:  # both method are jit-able
+@@ -160,7 +170,7 @@ class NNXTrainingOffline(TrainingOffline):
+                     if not self.jit_sampling:
+                         batch = self.memory.sample()
+                         with jax.profiler.TraceAnnotation("train"):
+-                            out = _train_jit(batch, self.agent)
++                            out = self._train_batch(batch)
+                     else:
+                         with jax.profiler.TraceAnnotation("sample_and_train"):
+                             out = _sample_and_train_jit(self.memory, self.agent, self.jit_substeps)
+@@ -211,7 +221,7 @@ class NNXTrainingOffline(TrainingOffline):
+                 if not self.jit_sampling:  # sampling method not jit-able
+                     batch = self.memory.sample()
+                     t_sample = time.perf_counter()
+-                    stats_training_dict = _train_jit(batch, self.agent)
++                    stats_training_dict = self._train_batch(batch)
+                     t_train = time.perf_counter()
+                     sampling_duration += t_sample - t_update_buffer
+                     training_step_duration += t_train - t_sample
+diff --git a/tmrl/core/networking.py b/tmrl/core/networking.py
+index a45f74e..382580c 100644
+--- a/tmrl/core/networking.py
++++ b/tmrl/core/networking.py
+@@ -9,6 +9,7 @@ import shutil
+ import tempfile
+ import itertools
+ from os.path import exists
++from pathlib import Path
+ 
+ # third-party imports
+ import numpy as np
+@@ -539,6 +540,14 @@ class RolloutWorker:
+             self.actor = self.actor.load(self.model_path, device=self.device)
+         else:
+             logging.debug(f"No model found at {self.model_path}")
++        warmup_actor = getattr(self.actor, "warmup", None)
++        if warmup_actor is not None:
++            warmup_started = time.perf_counter()
++            warmup_actor()
++            logging.info(
++                "Rollout actor warm-up completed in %.3f seconds.",
++                time.perf_counter() - warmup_started,
++            )
+         self.buffer = Buffer()
+         self.max_samples_per_episode = max_samples_per_episode
+         self.crc_debug = crc_debug
+@@ -604,6 +613,12 @@ class RolloutWorker:
+             dict: information retrieved from the environment)
+         """
+         obs = None
++        # Recurrent policies (for example Dreamer RSSM actors) must not carry
++        # latent state across episode boundaries. Feed-forward actors simply do
++        # not implement this optional hook.
++        reset_actor = getattr(self.actor, "reset", None)
++        if reset_actor is not None:
++            reset_actor()
+         try:
+             # Faster than hasattr() in real-time environments
+             act = self.env.unwrapped.default_action  # .astype(np.float32)
+@@ -999,8 +1014,25 @@ class RolloutWorker:
+         nb_received = len(weights_list)
+         if nb_received > 0:
+             weights = weights_list[-1]
+-            with open(self.model_path, 'wb') as f:
+-                f.write(weights)
++            model_path = Path(self.model_path)
++            model_path.parent.mkdir(parents=True, exist_ok=True)
++            handle = tempfile.NamedTemporaryFile(
++                mode="wb",
++                dir=model_path.parent,
++                prefix=f".{model_path.name}.",
++                suffix=".tmp",
++                delete=False,
++            )
++            temporary_path = Path(handle.name)
++            try:
++                with handle:
++                    handle.write(weights)
++                    handle.flush()
++                    os.fsync(handle.fileno())
++                os.replace(temporary_path, model_path)
++            except BaseException:
++                temporary_path.unlink(missing_ok=True)
++                raise
+             if self.model_history:
+                 self._cur_hist_cpt += 1
+                 if self._cur_hist_cpt == self.model_history:
+@@ -1012,7 +1044,15 @@ class RolloutWorker:
+                         print_with_timestamp("model weights saved in history")
+             self.actor = self.actor.load(self.model_path, device=self.device)
+             if verbose:
+-                print_with_timestamp("model weights have been updated")
++                accepted = getattr(self.actor, "last_load_succeeded", True)
++                if accepted:
++                    print_with_timestamp("model weights have been updated")
++                else:
++                    logging.warning(
++                        "Actor rejected incompatible broadcast weights and kept "
++                        "the last valid parameters: %s",
++                        getattr(self.actor, "last_load_error", "unknown error"),
++                    )
+         return nb_received
+ 
+     def ignore_actor_weights(self):
+diff --git a/tmrl/core/util.py b/tmrl/core/util.py
+index fbc7ca8..b43fd22 100644
+--- a/tmrl/core/util.py
++++ b/tmrl/core/util.py
+@@ -167,6 +167,7 @@ def git_info(path=None):
+ def dump(obj, path):
+     path = Path(path)
+     tmp_path = path.with_suffix('.tmp')
++    tmp_path.parent.mkdir(parents=True, exist_ok=True)
+     with DelayInterrupt():  # Continue to save even if SIGINT or SIGTERM is sent and raise KeyboardInterrupt afterwards.
+         with open(tmp_path, 'wb') as f:
+             pickle.dump(obj, f, pickle.HIGHEST_PROTOCOL)  # dump temporary file (can fail)
+@@ -181,6 +182,7 @@ def load(path):
+ def cloudpickle_dump(obj, path):
+     path = Path(path)
+     tmp_path = path.with_suffix('.tmp')
++    tmp_path.parent.mkdir(parents=True, exist_ok=True)
+     with DelayInterrupt():  # Continue to save even if SIGINT or SIGTERM is sent and raise KeyboardInterrupt afterwards.
+         with open(tmp_path, 'wb') as f:
+             cloudpickle.dump(obj, f)  # dump temporary file (can fail)
+@@ -193,6 +195,8 @@ def cloudpickle_load(path):
+ 
+ 
+ def save_json(d, path):
++    path = Path(path)
++    path.parent.mkdir(parents=True, exist_ok=True)
+     with open(path, 'w', encoding='utf-8') as f:
+         json.dump(d, f, ensure_ascii=False, indent=2)
+ 
+diff --git a/tmrl/custom/jax/custom_models.py b/tmrl/custom/jax/custom_models.py
+index ea12984..b7d3d1d 100644
+--- a/tmrl/custom/jax/custom_models.py
++++ b/tmrl/custom/jax/custom_models.py
+@@ -180,91 +180,353 @@ class NNXREDQMLPActorCritic(nnx.Module):
+             for _ in range(self.n)
+         ])
+ 
+-if __name__ == "__main__":
+-    import jax.numpy as jnp
+-    import gymnasium as gym
++# --- CNN helpers ---
+ 
+-    env = gym.make("Pendulum-v1", render_mode="rgb_array", g=9.81)
+-    act_space = env.action_space
+-    obs_space = env.observation_space
+ 
+-    ac = NNXREDQMLPActorCritic(observation_space=obs_space, action_space=act_space)
++def conv2d_out_dims(kernel_size: tuple[int, int], strides: tuple[int, int], h_in: int, w_in: int) -> tuple[int, int]:
++    """
++    Calculates output spatial dimensions for 2D convolution with VALID padding.
++    """
++    h_out = floor((h_in - kernel_size[0]) / strides[0] + 1)
++    w_out = floor((w_in - kernel_size[1]) / strides[1] + 1)
++    return h_out, w_out
+ 
+-    # Forward pass
+-    x = obs_space.sample()
+ 
+-    model = ac.actor
++# --- Vanilla CNN FOR GRAYSCALE IMAGES ---
+ 
+-    model.train()
+-    y = model.act_(x)
+-    print(y)
+-    model.eval()
+-    y = model.act_(x)
+-    print(y)
+-    y = model.act_(x)
+-    print(y)
+ 
++class VanillaCNN(nnx.Module):
++    """
++    Vanilla CNN feature extractor and MLP fusion head in Flax NNX.
++    Extracts features from stacked frames and concatenates vehicle telemetry.
++    """
++    def __init__(self,
++                 q_net: bool = False,
++                 img_height: int = cfg.IMG_HEIGHT,
++                 img_width: int = cfg.IMG_WIDTH,
++                 img_hist_len: int = cfg.IMG_HIST_LEN,
++                 dropout: float = 0.0,
++                 layer_norm: bool = False,
++                 rngs: nnx.Rngs = None):
++        super().__init__()
++        rngs = rngs or get_rngs()
++        self.q_net = q_net
++        self.img_height = img_height
++        self.img_width = img_width
++        self.img_hist_len = img_hist_len
++        h, w = img_height, img_width
++
++        # NNX Conv: (in_features, out_features, kernel_size, strides) â€” channels-last by default
++        self.conv1 = nnx.Conv(img_hist_len, 64, kernel_size=(8, 8), strides=(2, 2), padding='VALID', rngs=rngs)
++        h, w = conv2d_out_dims((8, 8), (2, 2), h, w)
++        self.conv2 = nnx.Conv(64, 64, kernel_size=(4, 4), strides=(2, 2), padding='VALID', rngs=rngs)
++        h, w = conv2d_out_dims((4, 4), (2, 2), h, w)
++        self.conv3 = nnx.Conv(64, 128, kernel_size=(4, 4), strides=(2, 2), padding='VALID', rngs=rngs)
++        h, w = conv2d_out_dims((4, 4), (2, 2), h, w)
++        self.conv4 = nnx.Conv(128, 128, kernel_size=(4, 4), strides=(2, 2), padding='VALID', rngs=rngs)
++        h, w = conv2d_out_dims((4, 4), (2, 2), h, w)
++
++        self.flat_features = 128 * h * w
++        mlp_input = self.flat_features + 12 if q_net else self.flat_features + 9
++
++        if q_net:
++            mlp_sizes = [mlp_input, 256, 256, 1]
++            drop = [dropout, dropout, 0.0]
++            ln = [layer_norm, layer_norm, False]
++        else:
++            mlp_sizes = [mlp_input, 256, 256]
++            drop = [dropout, dropout]
++            ln = [layer_norm, layer_norm]
++
++        self.mlp = mlp(mlp_sizes, nnx.relu, dropout=drop, layer_norm=ln, rngs=rngs)
++
++    def __call__(self, x):
++        if self.q_net:
++            speed, gear, rpm, images, act1, act2, act = x
++        else:
++            speed, gear, rpm, images, act1, act2 = x
++
++        # NNX Conv expects (batch, H, W, C); permute if images are (batch, C, H, W)
++        if images.ndim == 4 and images.shape[1] == self.img_hist_len and images.shape[-1] != self.img_hist_len:
++            images = jnp.transpose(images, (0, 2, 3, 1))
++
++        x_img = nnx.relu(self.conv1(images))
++        x_img = nnx.relu(self.conv2(x_img))
++        x_img = nnx.relu(self.conv3(x_img))
++        x_img = nnx.relu(self.conv4(x_img))
++        x_img = x_img.reshape(x_img.shape[0], -1)
++
++        if self.q_net:
++            fused = jnp.concatenate([speed, gear, rpm, x_img, act1, act2, act], axis=-1)
++        else:
++            fused = jnp.concatenate([speed, gear, rpm, x_img, act1, act2], axis=-1)
++
++        return self.mlp(fused)
++
++
++class NNXSquashedGaussianVanillaCNNActor(NNXActorModule):
++    """
++    Squashed Gaussian CNN Actor Policy in Flax NNX.
++    """
++    def __init__(self,
++                 observation_space,
++                 action_space,
++                 layer_norm: bool = False,
++                 rngs: nnx.Rngs = None,
++                 internal_rngs_seed: int = None):
++        super().__init__(observation_space, action_space)
++
++        rngs = rngs or get_rngs()
++        self._rngs = get_rngs() if internal_rngs_seed is None else get_rngs(internal_rngs_seed, internal_rngs_seed + 1, internal_rngs_seed + 2)
++
++        dim_act = action_space.shape[0]
++        self.act_limit = float(action_space.high[0])
++
++        img_hist_len = cfg.IMG_HIST_LEN
++        img_height = cfg.IMG_HEIGHT
++        img_width = cfg.IMG_WIDTH
++        if observation_space is not None and hasattr(observation_space, "__getitem__") and len(observation_space) > 3:
++            img_shape = observation_space[3].shape
++            if len(img_shape) == 3:
++                if img_shape[0] in [1, 3, 4]:
++                    img_hist_len, img_height, img_width = img_shape
++                else:
++                    img_height, img_width, img_hist_len = img_shape
++
++        self.net = VanillaCNN(
++            q_net=False,
++            img_height=img_height,
++            img_width=img_width,
++            img_hist_len=img_hist_len,
++            layer_norm=layer_norm,
++            rngs=rngs,
++        )
++        self.mu_layer = nnx.Linear(256, dim_act, rngs=rngs)
++        self.log_std_layer = nnx.Linear(256, dim_act, rngs=rngs)
++
++    def __call__(self, obs, rngs: nnx.Rngs, test: bool = False, with_logprob: bool = True, epsilon: float = 1e-8):
++        net_out = self.net(obs)
++        mu = self.mu_layer(net_out)
++        log_std = self.log_std_layer(net_out)
++        log_std = jnp.clip(log_std, LOG_STD_MIN, LOG_STD_MAX)
++        std = jnp.exp(log_std)
++
++        if test:
++            pi_action = mu
++        else:
++            eps = jax.random.normal(rngs.noise(), mu.shape)
++            pi_action = mu + std * eps
++
++        if with_logprob:
++            logp_pi = (-0.5 * ((pi_action - mu) / (std + epsilon))**2 - log_std - 0.5 * jnp.log(2 * jnp.pi)).sum(axis=-1)
++            logp_pi -= (2 * (jnp.log(2) - pi_action - jax.nn.softplus(-2 * pi_action))).sum(axis=-1)
++        else:
++            logp_pi = None
++
++        pi_action = jnp.tanh(pi_action)
++        pi_action = self.act_limit * pi_action
++
++        return pi_action, logp_pi
+ 
++    def act(self, obs, test: bool = False):
++        a, _ = self.__call__(obs=obs, rngs=self._rngs, test=test, with_logprob=False)
++        res = np.array(a.squeeze())
++        if not len(res.shape):
++            res = np.expand_dims(res, 0)
++        return res
+ 
+-# # --- CNN helpers ---
+ 
+-# def conv2d_out_dims(conv, h_in, w_in):
+-#     def out(i, padding, dilation, kernel, stride):
+-#         return floor((i + 2 * padding - dilation * (kernel - 1) - 1) / stride + 1)
+-#     h_out = out(h_in, conv.strides[0], 1, conv.kernel_size[0], conv.strides[0])  # NNX Conv uses strides/kernel_size tuples
+-#     w_out = out(w_in, conv.strides[1], 1, conv.kernel_size[1], conv.strides[1])
+-#     return h_out, w_out
++class NNXVanillaCNNQFunction(nnx.Module):
++    """
++    Vanilla CNN Critic Q-Network in Flax NNX.
++    """
++    def __init__(self,
++                 observation_space,
++                 action_space,
++                 dropout: float = 0.0,
++                 layer_norm: bool = False,
++                 rngs: nnx.Rngs = None):
++        super().__init__()
++        rngs = rngs or get_rngs()
+ 
++        img_hist_len = cfg.IMG_HIST_LEN
++        img_height = cfg.IMG_HEIGHT
++        img_width = cfg.IMG_WIDTH
++        if observation_space is not None and hasattr(observation_space, "__getitem__") and len(observation_space) > 3:
++            img_shape = observation_space[3].shape
++            if len(img_shape) == 3:
++                if img_shape[0] in [1, 3, 4]:
++                    img_hist_len, img_height, img_width = img_shape
++                else:
++                    img_height, img_width, img_hist_len = img_shape
++
++        self.net = VanillaCNN(
++            q_net=True,
++            img_height=img_height,
++            img_width=img_width,
++            img_hist_len=img_hist_len,
++            dropout=dropout,
++            layer_norm=layer_norm,
++            rngs=rngs,
++        )
+ 
+-# # --- Vanilla CNN ---
++    def __call__(self, obs, act):
++        x = (*obs, act)
++        q = self.net(x)
++        return q.squeeze(-1)
+ 
+-# class VanillaCNN(nnx.Module):
+-#     def __init__(self, q_net, img_height, img_width, img_hist_len, dropout=0.0, layer_norm=False, rngs: nnx.Rngs = None):
+-#         self.q_net = q_net
+-#         h, w = img_height, img_width
+ 
+-#         # NNX Conv2d: (in_features, out_features, kernel_size) â€” channels-last by default
+-#         self.conv1 = nnx.Conv(img_hist_len, 64, kernel_size=(8, 8), strides=(2, 2), rngs=rngs)
+-#         h, w = floor((h - 8) / 2 + 1), floor((w - 8) / 2 + 1)
+-#         self.conv2 = nnx.Conv(64, 64, kernel_size=(4, 4), strides=(2, 2), rngs=rngs)
+-#         h, w = floor((h - 4) / 2 + 1), floor((w - 4) / 2 + 1)
+-#         self.conv3 = nnx.Conv(64, 128, kernel_size=(4, 4), strides=(2, 2), rngs=rngs)
+-#         h, w = floor((h - 4) / 2 + 1), floor((w - 4) / 2 + 1)
+-#         self.conv4 = nnx.Conv(128, 128, kernel_size=(4, 4), strides=(2, 2), rngs=rngs)
+-#         h, w = floor((h - 4) / 2 + 1), floor((w - 4) / 2 + 1)
++class NNXREDQVanillaCNNActorCritic(nnx.Module):
++    """
++    REDQ / SAC Ensemble Container for CNN Models.
++    Holds 1 actor and n critics (default n=2 for standard SAC).
++    """
++    def __init__(self,
++                 observation_space,
++                 action_space,
++                 n: int = 2,
++                 critic_dropout: float = 0.0,
++                 critic_layer_norm: bool = False,
++                 actor_layer_norm: bool = False,
++                 rngs: nnx.Rngs = None):
++        super().__init__()
++        rngs = rngs or get_rngs()
++        self.n = n
+ 
+-#         flat_features = 128 * h * w
+-#         mlp_input = flat_features + 12 if q_net else flat_features + 9
++        self.actor = NNXSquashedGaussianVanillaCNNActor(
++            observation_space, action_space, layer_norm=actor_layer_norm, rngs=rngs
++        )
++        self.qs = nnx.List([
++            NNXVanillaCNNQFunction(
++                observation_space=observation_space,
++                action_space=action_space,
++                dropout=critic_dropout,
++                layer_norm=critic_layer_norm,
++                rngs=rngs,
++            )
++            for _ in range(self.n)
++        ])
+ 
+-#         if q_net:
+-#             mlp_sizes = [mlp_input, 256, 256, 1]
+-#             drop = [dropout, dropout, 0.0]
+-#             ln = [layer_norm, layer_norm, False]
+-#         else:
+-#             mlp_sizes = [mlp_input, 256, 256]
+-#             drop = [dropout, dropout]
+-#             ln = [layer_norm, layer_norm]
+ 
+-#         self.mlp = mlp(mlp_sizes, nnx.relu, dropout=drop, layer_norm=ln, rngs=rngs)
++# --- Vanilla CNN FOR COLOR IMAGES ---
+ 
+-#     def __call__(self, x):
+-#         if self.q_net:
+-#             speed, gear, rpm, images, act1, act2, act = x
+-#         else:
+-#             speed, gear, rpm, images, act1, act2 = x
+ 
+-#         # NNX Conv expects (batch, H, W, C); permute if images are (batch, C, H, W)
+-#         images = jnp.transpose(images, (0, 2, 3, 1))
++def remove_colors(images):
++    """
++    Removes color channels so that grayscale-based models can be used.
++    Assumes images have shape (..., C, 3) or (..., 3) where the last dimension is RGB.
++    """
++    return images[..., 0]
+ 
+-#         x = nnx.relu(self.conv1(images))
+-#         x = nnx.relu(self.conv2(x))
+-#         x = nnx.relu(self.conv3(x))
+-#         x = nnx.relu(self.conv4(x))
+-#         x = x.reshape(x.shape[0], -1)
+ 
+-#         if self.q_net:
+-#             x = jnp.concatenate([speed, gear, rpm, x, act1, act2, act], axis=-1)
+-#         else:
+-#             x = jnp.concatenate([speed, gear, rpm, x, act1, act2], axis=-1)
++class NNXSquashedGaussianVanillaColorCNNActor(NNXSquashedGaussianVanillaCNNActor):
++    def __call__(self, obs, rngs: nnx.Rngs, test: bool = False, with_logprob: bool = True, epsilon: float = 1e-8):
++        speed, gear, rpm, images, act1, act2 = obs
++        images = remove_colors(images)
++        obs = (speed, gear, rpm, images, act1, act2)
++        return super().__call__(obs, rngs=rngs, test=test, with_logprob=with_logprob, epsilon=epsilon)
+ 
+-#         return self.mlp(x)
++
++class NNXVanillaColorCNNQFunction(NNXVanillaCNNQFunction):
++    def __call__(self, obs, act):
++        speed, gear, rpm, images, act1, act2 = obs
++        images = remove_colors(images)
++        obs = (speed, gear, rpm, images, act1, act2)
++        return super().__call__(obs, act)
++
++
++class NNXREDQVanillaColorCNNActorCritic(nnx.Module):
++    def __init__(self,
++                 observation_space,
++                 action_space,
++                 n: int = 2,
++                 critic_dropout: float = 0.0,
++                 critic_layer_norm: bool = False,
++                 actor_layer_norm: bool = False,
++                 rngs: nnx.Rngs = None):
++        super().__init__()
++        rngs = rngs or get_rngs()
++        self.n = n
++        self.actor = NNXSquashedGaussianVanillaColorCNNActor(
++            observation_space, action_space, layer_norm=actor_layer_norm, rngs=rngs
++        )
++        self.qs = nnx.List([
++            NNXVanillaColorCNNQFunction(
++                observation_space=observation_space,
++                action_space=action_space,
++                dropout=critic_dropout,
++                layer_norm=critic_layer_norm,
++                rngs=rngs,
++            )
++            for _ in range(self.n)
++        ])
++
++
++if __name__ == "__main__":
++    import gymnasium as gym
++
++    # 1. Test MLP
++    print("Testing MLP Actor-Critic on Pendulum-v1...")
++    env = gym.make("Pendulum-v1", render_mode="rgb_array", g=9.81)
++    act_space = env.action_space
++    obs_space = env.observation_space
++
++    ac = NNXREDQMLPActorCritic(observation_space=obs_space, action_space=act_space)
++    x = obs_space.sample()
++
++    model = ac.actor
++    model.train()
++    y = model.act_(x)
++    print("MLP act_ output shape:", y.shape)
++
++    # 2. Test CNN
++    print("\nTesting Vanilla CNN Actor-Critic...")
++    batch_size = 4
++    # Mock observation tuple matching TrackMania:
++    # (speed: 1, gear: 1, rpm: 1, images: C x H x W, act1: 3, act2: 3)
++    mock_obs = (
++        jnp.zeros((batch_size, 1), dtype=jnp.float32),
++        jnp.zeros((batch_size, 1), dtype=jnp.float32),
++        jnp.zeros((batch_size, 1), dtype=jnp.float32),
++        jnp.zeros((batch_size, cfg.IMG_HIST_LEN, cfg.IMG_HEIGHT, cfg.IMG_WIDTH), dtype=jnp.float32),
++        jnp.zeros((batch_size, 3), dtype=jnp.float32),
++        jnp.zeros((batch_size, 3), dtype=jnp.float32),
++    )
++    mock_act = jnp.zeros((batch_size, 3), dtype=jnp.float32)
++
++    dummy_act_space = gym.spaces.Box(low=-1.0, high=1.0, shape=(3,))
++    dummy_obs_space = gym.spaces.Tuple((
++        gym.spaces.Box(low=-np.inf, high=np.inf, shape=(1,)),
++        gym.spaces.Box(low=-np.inf, high=np.inf, shape=(1,)),
++        gym.spaces.Box(low=-np.inf, high=np.inf, shape=(1,)),
++        gym.spaces.Box(low=0.0, high=255.0, shape=(cfg.IMG_HIST_LEN, cfg.IMG_HEIGHT, cfg.IMG_WIDTH)),
++        gym.spaces.Box(low=-1.0, high=1.0, shape=(3,)),
++        gym.spaces.Box(low=-1.0, high=1.0, shape=(3,)),
++    ))
++
++    cnn_ac = NNXREDQVanillaCNNActorCritic(
++        observation_space=dummy_obs_space,
++        action_space=dummy_act_space,
++        n=2
++    )
++
++    rngs = get_rngs()
++    action, logprob = cnn_ac.actor(mock_obs, rngs=rngs)
++    print("CNN Actor action shape:", action.shape, "logprob shape:", logprob.shape)
++
++    q1 = cnn_ac.qs[0](mock_obs, mock_act)
++    print("CNN Critic Q1 shape:", q1.shape)
++
++    # Test single-step inference act() for RolloutWorker
++    single_obs = (
++        np.zeros((1,), dtype=np.float32),
++        np.zeros((1,), dtype=np.float32),
++        np.zeros((1,), dtype=np.float32),
++        np.zeros((cfg.IMG_HIST_LEN, cfg.IMG_HEIGHT, cfg.IMG_WIDTH), dtype=np.float32),
++        np.zeros((3,), dtype=np.float32),
++        np.zeros((3,), dtype=np.float32),
++    )
++    act_res = cnn_ac.actor.act_(single_obs)
++    print("CNN Actor act_ output shape:", act_res.shape)
++
++    print("\nAll tests passed successfully!")
+diff --git a/tmrl/custom/tm/tm_gym_interfaces.py b/tmrl/custom/tm/tm_gym_interfaces.py
+index 68aa955..6ffc0be 100644
+--- a/tmrl/custom/tm/tm_gym_interfaces.py
++++ b/tmrl/custom/tm/tm_gym_interfaces.py
+@@ -1,9 +1,11 @@
+ # rtgym interfaces for Trackmania
+ 
+ # standard library imports
++import hashlib
+ import logging
+ import time
+ from collections import deque
++from pathlib import Path
+ 
+ # third-party imports
+ import cv2
+@@ -21,6 +23,7 @@ from tmrl.custom.tm.utils.control_mouse import mouse_close_finish_pop_up_tm20
+ from tmrl.custom.tm.utils.control_keyboard import apply_control, keyres
+ from tmrl.custom.tm.utils.window import WindowInterface
+ from tmrl.custom.tm.utils.tools import Lidar, TM2020OpenPlanetClient, save_ghost
++from tmrl.custom.tm.utils.trajectory_assist import DemonstrationTrajectoryAssist
+ 
+ # Globals ==============================================================================================================
+ 
+@@ -66,14 +69,19 @@ class TM2020Interface(RealTimeGymInterface):
+         self.constant_penalty = cfg.REWARD_CONFIG['CONSTANT_PENALTY']
+ 
+         self.initialized = False
++        self.latest_data = None
++        self.trajectory_assist = None
++        self._trajectory_assist_active = False
++        self._skip_assist_controls = 0
++        self.last_assist_info = {}
+ 
+     def initialize_common(self):
++        self.window_interface = WindowInterface("Trackmania")
++        self.window_interface.move_and_resize()
+         if self.gamepad:
+             import vgamepad as vg
+             self.j = vg.VX360Gamepad()
+             logging.debug(" virtual joystick in use")
+-        self.window_interface = WindowInterface("Trackmania")
+-        self.window_interface.move_and_resize()
+         self.last_time = time.time()
+         self.img_hist = deque(maxlen=self.img_hist_len)
+         self.img = None
+@@ -84,6 +92,72 @@ class TM2020Interface(RealTimeGymInterface):
+                                               min_nb_steps_before_failure=cfg.REWARD_CONFIG['MIN_STEPS'],
+                                               max_dist_from_traj=cfg.REWARD_CONFIG['MAX_STRAY'])
+         self.client = TM2020OpenPlanetClient()
++        self.auto_map_cycle = bool(cfg.TMRL_CONFIG.get("AUTO_MAP_CYCLE", True))
++        self.episodes_per_map = int(cfg.TMRL_CONFIG.get("EPISODES_PER_MAP", 5))
++        self.episodes_on_current_map = 0
++        self.driving_safety = cfg.TMRL_CONFIG.get("DRIVING_SAFETY", {})
++        self.trajectory_assist = DemonstrationTrajectoryAssist(
++            self.driving_safety.get("TRAJECTORY_ASSIST", {})
++        )
++        self._track_identity_logged = False
++
++    @staticmethod
++    def _sha256_file(path):
++        digest = hashlib.sha256()
++        with Path(path).open("rb") as handle:
++            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
++                digest.update(chunk)
++        return digest.hexdigest()
++
++    def validate_deployment_track(self, data):
++        """Refuse control if the loaded map is not the demonstrated map."""
++        safety = getattr(self, "driving_safety", {})
++        if not safety or not bool(safety.get("ENABLED", False)):
++            return
++
++        track_id = safety.get("EXPECTED_TRACK_ID", "configured track")
++        active_map_path = safety.get("ACTIVE_MAP_PATH")
++        expected_map_sha256 = safety.get("EXPECTED_MAP_SHA256")
++        if active_map_path and expected_map_sha256:
++            active_map = Path(active_map_path)
++            if not active_map.is_file():
++                raise RuntimeError(
++                    f"Driving safety gate: active map file is missing: {active_map}"
++                )
++            actual_sha256 = self._sha256_file(active_map)
++            if actual_sha256.lower() != str(expected_map_sha256).lower():
++                self.send_control(self.get_default_action())
++                raise RuntimeError(
++                    "Driving safety gate: active map file does not match "
++                    f"{track_id} (expected {expected_map_sha256}, got {actual_sha256})"
++                )
++
++        expected_start = safety.get("EXPECTED_START_POSITION")
++        if expected_start is not None:
++            expected_start = np.asarray(expected_start, dtype=np.float32)
++            if expected_start.shape != (3,):
++                raise ValueError(
++                    "DRIVING_SAFETY.EXPECTED_START_POSITION must contain [x, y, z]"
++                )
++            actual_start = np.asarray([data[2], data[3], data[4]], dtype=np.float32)
++            tolerance = float(safety.get("START_TOLERANCE_METERS", 10.0))
++            distance = float(np.linalg.norm(actual_start - expected_start))
++            if not np.isfinite(distance) or distance > tolerance:
++                self.send_control(self.get_default_action())
++                raise RuntimeError(
++                    "Driving safety gate: Trackmania has a different map cached. "
++                    f"Expected {track_id} start {expected_start.tolist()}, got "
++                    f"{actual_start.tolist()} ({distance:.1f} m away). Reload the "
++                    "configured map before starting the worker."
++                )
++            if not self._track_identity_logged:
++                logging.info(
++                    "Driving safety gate accepted %s: start position is %.2f m "
++                    "from the demonstrated start.",
++                    track_id,
++                    distance,
++                )
++                self._track_identity_logged = True
+ 
+     def initialize(self):
+         self.initialize_common()
+@@ -98,6 +172,41 @@ class TM2020Interface(RealTimeGymInterface):
+         Args:
+             control: np.array: [forward,backward,right,left]
+         """
++        if (
++            control is not None
++            and self._trajectory_assist_active
++            and self.trajectory_assist is not None
++            and self.trajectory_assist.enabled
++            and self.latest_data is not None
++        ):
++            if self._skip_assist_controls > 0:
++                self._skip_assist_controls -= 1
++            else:
++                try:
++                    assisted, assist_info = self.trajectory_assist.action(
++                        self.latest_data, control
++                    )
++                except Exception:
++                    logging.exception(
++                        "Trajectory assist failed; applying emergency stop."
++                    )
++                    assisted = np.asarray([-1.0, 1.0, 0.0], dtype=np.float32)
++                    assist_info = {
++                        "enabled": True,
++                        "emergency_stop": True,
++                        "controller_error": True,
++                        "applied_action": assisted.copy(),
++                    }
++                self.last_assist_info = assist_info
++                # RTGym stores the same numpy object in its delayed action
++                # buffer before this asynchronous callback runs.  Mutating it
++                # makes observations and replay samples describe the action
++                # that actually reached the game, not the rejected proposal.
++                try:
++                    control[...] = assisted
++                except (TypeError, ValueError):
++                    control = assisted
++
+         if self.gamepad:
+             if control is not None:
+                 control_gamepad(self.j, control)
+@@ -123,6 +232,7 @@ class TM2020Interface(RealTimeGymInterface):
+         else:
+             img = img[:, :, ::-1]  # reversed view for numpy RGB convention
+         data = self.client.retrieve_data()
++        self.latest_data = data
+         self.img = img  # for render()
+         return data, img
+ 
+@@ -135,8 +245,29 @@ class TM2020Interface(RealTimeGymInterface):
+     def reset_common(self):
+         if not self.initialized:
+             self.initialize()
++        self._trajectory_assist_active = False
++        self._skip_assist_controls = 0
++        self.last_assist_info = {}
++        if self.trajectory_assist is not None:
++            self.trajectory_assist.reset()
+         self.send_control(self.get_default_action())
+-        self.reset_race()
++        self.episodes_on_current_map += 1
++
++        if self.auto_map_cycle and self.episodes_on_current_map >= self.episodes_per_map:
++            logging.info(
++                f"[AutoMapCycler] Reached {self.episodes_on_current_map} episodes on current track. "
++                f"Automatically cycling to next track..."
++            )
++            try:
++                from scripts.cycle_map_macro import cycle_now
++                cycle_now(strategy="active_file", gamepad=self.j if self.gamepad else None)
++            except Exception as e:
++                logging.error(f"[AutoMapCycler] Exception cycling map: {e}")
++                self.reset_race()
++            self.episodes_on_current_map = 0
++        else:
++            self.reset_race()
++
+         time_sleep = max(0, cfg.SLEEP_TIME_AT_RESET - 0.1) if self.gamepad else cfg.SLEEP_TIME_AT_RESET
+         time.sleep(time_sleep)  # must be long enough for image to be refreshed
+ 
+@@ -146,6 +277,12 @@ class TM2020Interface(RealTimeGymInterface):
+         """
+         self.reset_common()
+         data, img = self.grab_data_and_img()
++        self.validate_deployment_track(data)
++        if self.trajectory_assist is not None and self.trajectory_assist.enabled:
++            self._trajectory_assist_active = True
++            # RTGym launches one default-action thread immediately after reset.
++            # Keep that reset action neutral, then assist policy actions.
++            self._skip_assist_controls = 1
+         speed = np.array([
+             data[0],
+         ], dtype='float32')
+@@ -196,12 +333,18 @@ class TM2020Interface(RealTimeGymInterface):
+         rpm = np.array([
+             data[10],
+         ], dtype='float32')
+-        rew, terminated = self.reward_function.compute_reward(pos=np.array([data[2], data[3], data[4]]))
++        rew, terminated = self.reward_function.compute_reward(
++            pos=np.array([data[2], data[3], data[4]]),
++            speed=speed,
++            distance=data[1],
++        )
+         self.img_hist.append(img)
+         imgs = np.array(list(self.img_hist))
+         obs = [speed, gear, rpm, imgs]
+         end_of_track = bool(data[8])
+         info = {}
++        if self.last_assist_info:
++            info["trajectory_assist"] = dict(self.last_assist_info)
+         if end_of_track:
+             terminated = True
+             rew += self.finish_reward
+@@ -279,7 +422,11 @@ class TM2020InterfaceLidar(TM2020Interface):
+         obs must be a list of numpy arrays
+         """
+         img, speed, data = self.grab_lidar_speed_and_data()
+-        rew, terminated = self.reward_function.compute_reward(pos=np.array([data[2], data[3], data[4]]))
++        rew, terminated = self.reward_function.compute_reward(
++            pos=np.array([data[2], data[3], data[4]]),
++            speed=speed,
++            distance=data[1],
++        )
+         self.img_hist.append(img)
+         imgs = np.array(list(self.img_hist), dtype='float32')
+         obs = [speed, imgs]
+@@ -326,7 +473,11 @@ class TM2020InterfaceLidarProgress(TM2020InterfaceLidar):
+         obs must be a list of numpy arrays
+         """
+         img, speed, data = self.grab_lidar_speed_and_data()
+-        rew, terminated = self.reward_function.compute_reward(pos=np.array([data[2], data[3], data[4]]))
++        rew, terminated = self.reward_function.compute_reward(
++            pos=np.array([data[2], data[3], data[4]]),
++            speed=speed,
++            distance=data[1],
++        )
+         progress = np.array([self.reward_function.cur_idx / self.reward_function.datalen], dtype='float32')
+         self.img_hist.append(img)
+         imgs = np.array(list(self.img_hist), dtype='float32')
+diff --git a/tmrl/custom/tm/utils/compute_reward.py b/tmrl/custom/tm/utils/compute_reward.py
+index 1c443fc..ea005d6 100644
+--- a/tmrl/custom/tm/utils/compute_reward.py
++++ b/tmrl/custom/tm/utils/compute_reward.py
+@@ -36,6 +36,10 @@ class RewardFunction:
+             with open(reward_data_path, 'rb') as f:
+                 self.data = pickle.load(f)
+ 
++        self.universal_mode = os.environ.get("TMRL_UNIVERSAL_REWARD", "1") == "1" or not os.path.exists(reward_data_path)
++        self.last_distance = 0.0
++        self.max_stall_steps = int(4.0 * 20)  # 4 seconds without forward progress -> failure
++
+         self.cur_idx = 0
+         self.nb_obs_forward = nb_obs_forward
+         self.nb_obs_backward = nb_obs_backward
+@@ -48,14 +52,44 @@ class RewardFunction:
+ 
+         # self.traj = []
+ 
+-    def compute_reward(self, pos):
++    def compute_reward(self, pos, speed=None, distance=None):
+         """
+-        Computes the current reward given the position pos
++        Computes the current reward given the position pos, speed, and distance
+         Args:
+             pos: the current position
++            speed: the current speed
++            distance: current distance along track (from OpenPlanet telemetry)
+         Returns:
+             float, bool: the reward and the terminated signal
+         """
++        if self.universal_mode:
++            self.step_counter += 1
++            terminated = False
++
++            if distance is not None:
++                curr_dist = float(distance)
++                if self.last_distance == 0.0:
++                    delta_d = 0.0
++                else:
++                    delta_d = max(0.0, curr_dist - self.last_distance)
++                self.last_distance = curr_dist
++
++                spd = float(speed[0]) if hasattr(speed, '__getitem__') else float(speed or 0.0)
++                reward = (delta_d * 0.1) + (max(0.0, spd) * 0.0005)
++
++                if delta_d > 0.1 or spd > 10.0:
++                    self.failure_counter = 0
++                else:
++                    self.failure_counter += 1
++            else:
++                reward = 0.0
++                self.failure_counter += 1
++
++            if self.step_counter > self.min_nb_steps_before_failure:
++                if self.failure_counter > self.max_stall_steps:
++                    terminated = True
++
++            return reward, terminated
+         # self.traj.append(pos)
+ 
+         terminated = False
+@@ -127,5 +161,6 @@ class RewardFunction:
+         self.cur_idx = 0
+         self.step_counter = 0
+         self.failure_counter = 0
++        self.last_distance = 0.0
+ 
+         # self.traj = []
+diff --git a/tmrl/custom/tm/utils/control_gamepad.py b/tmrl/custom/tm/utils/control_gamepad.py
+index 845bcb3..a703501 100644
+--- a/tmrl/custom/tm/utils/control_gamepad.py
++++ b/tmrl/custom/tm/utils/control_gamepad.py
+@@ -9,8 +9,10 @@ if platform.system() in ("Windows", "Linux"):
+         assert all(-1.0 <= c <= 1.0 for c in control), "This function accepts only controls between -1.0 and 1.0"
+         if control[0] > 0:  # gas
+             gamepad.right_trigger_float(value_float=control[0])
++            gamepad.press_button(button=0x1000)  # Button A
+         else:
+             gamepad.right_trigger_float(value_float=0.0)
++            gamepad.release_button(button=0x1000)
+         if control[1] > 0:  # break
+             gamepad.left_trigger_float(value_float=control[1])
+         else:
+diff --git a/tmrl/custom/tm/utils/tools.py b/tmrl/custom/tm/utils/tools.py
+index 49ec700..7857680 100644
+--- a/tmrl/custom/tm/utils/tools.py
++++ b/tmrl/custom/tm/utils/tools.py
+@@ -50,7 +50,7 @@ class TM2020OpenPlanetClient:
+                 self.__data = data_used
+                 self.__lock.release()
+ 
+-    def retrieve_data(self, sleep_if_empty=0.01, timeout=10.0):
++    def retrieve_data(self, sleep_if_empty=0.01, timeout=60.0):
+         """
+         Retrieves the most recently received data
+         Use this function to retrieve the most recently received data
+diff --git a/tmrl/custom/tm/utils/window.py b/tmrl/custom/tm/utils/window.py
+index 392823f..ffadfc6 100644
+--- a/tmrl/custom/tm/utils/window.py
++++ b/tmrl/custom/tm/utils/window.py
+@@ -1,3 +1,4 @@
++import atexit
+ import logging
+ 
+ import platform
+@@ -9,17 +10,179 @@ import tmrl.config.config_constants as cfg
+ 
+ if platform.system() == "Windows":
+ 
++    import ctypes
+     import win32gui
+     import win32ui
+     import win32con
+ 
++    _DXCAM_CAMERA = None
++    _DXCAM_REGION = None
++    _DXCAM_STARTED = False
++
++
++    def _dpi_scale(hwnd):
++        try:
++            awareness = ctypes.c_int()
++            ctypes.windll.shcore.GetProcessDpiAwareness(
++                0, ctypes.byref(awareness)
++            )
++            if awareness.value != 0:
++                # Coordinates are already physical pixels for DPI-aware callers.
++                return 1.0
++            return max(
++                1.0,
++                float(ctypes.windll.user32.GetDpiForWindow(hwnd)) / 96.0,
++            )
++        except (AttributeError, OSError):
++            return 1.0
++
++
++    def _physical_client_region(hwnd):
++        cr = win32gui.GetClientRect(hwnd)
++        left, top = win32gui.ClientToScreen(hwnd, (cr[0], cr[1]))
++        right, bottom = win32gui.ClientToScreen(hwnd, (cr[2], cr[3]))
++        scale = _dpi_scale(hwnd)
++        region = tuple(
++            int(round(value * scale))
++            for value in (left, top, right, bottom)
++        )
++        if region[2] <= region[0] or region[3] <= region[1]:
++            raise RuntimeError(
++                f"Trackmania client rectangle is not capturable: {region}"
++            )
++        return region
++
++
++    def _prepare_trackmania_window(window_name="Trackmania"):
++        """Place the client at the configured capture location before streaming."""
++        hwnd = win32gui.FindWindow(None, window_name)
++        if not hwnd:
++            raise RuntimeError(f"Could not find a window named {window_name}.")
++        wr = win32gui.GetWindowRect(hwnd)
++        cr = win32gui.GetClientRect(hwnd)
++        w_diff = wr[2] - wr[0] - cr[2] + cr[0]
++        h_diff = wr[3] - wr[1] - cr[3] + cr[1]
++        x = -w_diff // 2
++        y = 0
++        w = int(cfg.WINDOW_WIDTH) + w_diff
++        h = int(cfg.WINDOW_HEIGHT) + h_diff
++        if getattr(cfg, "CAPTURE_KEEP_ON_TOP", False):
++            win32gui.SetWindowPos(
++                hwnd,
++                win32con.HWND_TOPMOST,
++                x,
++                y,
++                w,
++                h,
++                win32con.SWP_SHOWWINDOW,
++            )
++        else:
++            win32gui.MoveWindow(hwnd, x, y, w, h, True)
++        # DWM can clamp a borderless window by a pixel or two after MoveWindow.
++        import time
++
++        time.sleep(0.05)
++        return hwnd, _physical_client_region(hwnd)
++
++
++    def _release_dxcam():
++        global _DXCAM_CAMERA, _DXCAM_REGION, _DXCAM_STARTED
++        if _DXCAM_CAMERA is not None:
++            try:
++                if _DXCAM_STARTED:
++                    _DXCAM_CAMERA.stop()
++            except Exception:
++                pass
++            try:
++                _DXCAM_CAMERA.release()
++            except Exception:
++                pass
++            _DXCAM_CAMERA = None
++            _DXCAM_REGION = None
++            _DXCAM_STARTED = False
++
++
++    atexit.register(_release_dxcam)
++
++
++    def preinitialize_dxcam_capture(required=None):
++        """Create Desktop Duplication before PyTorch initializes GPU libraries.
++
++        On some hybrid-GPU laptops, importing/initializing PyTorch first makes
++        DXGI choose an incompatible adapter.  CLI entry points call this helper
++        before importing the torch-dependent configuration graph.
++        """
++        global _DXCAM_CAMERA, _DXCAM_REGION, _DXCAM_STARTED
++        requested = str(getattr(cfg, "CAPTURE_BACKEND", "gdi")).strip().lower()
++        if required is None:
++            required = requested == "dxcam"
++        if requested not in {"dxcam", "auto"}:
++            return None
++        if _DXCAM_CAMERA is not None:
++            return _DXCAM_CAMERA
++        try:
++            import dxcam
++
++            _DXCAM_CAMERA = dxcam.create(output_color="BGRA")
++            _, _DXCAM_REGION = _prepare_trackmania_window()
++            _DXCAM_CAMERA.start(
++                region=_DXCAM_REGION,
++                target_fps=max(1, int(getattr(cfg, "CAPTURE_FPS", 60))),
++                video_mode=True,
++            )
++            _DXCAM_STARTED = True
++            # Do not let the first environment reset consume an empty ring.
++            import time
++
++            deadline = time.perf_counter() + 2.0
++            while _DXCAM_CAMERA.get_latest_frame(copy=False) is None:
++                if time.perf_counter() >= deadline:
++                    raise RuntimeError("DXcam did not publish its first frame")
++                time.sleep(0.005)
++            return _DXCAM_CAMERA
++        except Exception as exc:
++            _release_dxcam()
++            if required:
++                raise RuntimeError(
++                    "DXcam capture was explicitly requested but could not be "
++                    "initialized. It must be created before PyTorch on hybrid-"
++                    "GPU Windows systems; also verify dxcam>=0.3.0 is installed."
++                ) from exc
++            logging.warning(
++                "DXcam unavailable (%s); falling back to slower GDI capture.",
++                exc,
++            )
++            return None
++
+ 
+     class WindowInterface:
+         def __init__(self, window_name):
+             self.window_name = window_name
++            self._dxcam = None
++            requested_backend = str(
++                getattr(cfg, "CAPTURE_BACKEND", "gdi")
++            ).strip().lower()
++            if requested_backend not in {"gdi", "dxcam", "auto"}:
++                raise ValueError(
++                    "ENV.CAPTURE_BACKEND must be one of: gdi, dxcam, auto"
++                )
++            self.capture_backend = requested_backend
++
++            try:
++                hdesk = ctypes.windll.user32.OpenDesktopW("Default", 0, False, 0x10000000)
++                if hdesk:
++                    res = ctypes.windll.user32.SetThreadDesktop(hdesk)
++                    err = ctypes.GetLastError()
++                    print(f"[WindowInterface] hdesk={hdesk}, SetThreadDesktop={res}, err={err}")
++                else:
++                    err = ctypes.GetLastError()
++                    print(f"[WindowInterface] OpenDesktopW failed: err={err}")
++            except Exception as e:
++                print(f"[WindowInterface] Exception: {e}")
+ 
+             hwnd = win32gui.FindWindow(None, self.window_name)
+             assert hwnd != 0, f"Could not find a window named {self.window_name}."
++            self.hwnd = hwnd
+ 
+             while True:  # in case the window is reduced
+                 wr = win32gui.GetWindowRect(hwnd)
+@@ -35,10 +198,41 @@ if platform.system() == "Windows":
+             self.x_origin_offset = - self.w_diff // 2
+             self.y_origin_offset = 0
+ 
+-        def screenshot(self):
+-            hwnd = win32gui.FindWindow(None, self.window_name)
+-            assert hwnd != 0, f"Could not find a window named {self.window_name}."
++            if requested_backend in {"dxcam", "auto"}:
++                self._dxcam = preinitialize_dxcam_capture(
++                    required=requested_backend == "dxcam"
++                )
++                if self._dxcam is not None:
++                    self.capture_backend = "dxcam"
++                    logging.info("Window capture backend: DXcam Desktop Duplication")
++                else:
++                    self.capture_backend = "gdi"
+ 
++        def __del__(self):
++            # DXcam is process-global and released through the atexit hook.
++            pass
++
++        def _dxcam_region(self, hwnd):
++            """Return the physical-pixel client rectangle expected by DXGI."""
++            return _physical_client_region(hwnd)
++
++        def _screenshot_dxcam(self, hwnd):
++            region = self._dxcam_region(hwnd)
++            if win32gui.IsIconic(hwnd):
++                raise RuntimeError(
++                    "Trackmania is minimized; DXcam cannot provide valid policy frames"
++                )
++            if region != _DXCAM_REGION:
++                raise RuntimeError(
++                    "Trackmania moved or resized after DXcam started. Restart the "
++                    f"worker to realign capture (expected {_DXCAM_REGION}, got {region})."
++                )
++            frame = self._dxcam.get_latest_frame(copy=True)
++            if frame is None:
++                raise RuntimeError("DXcam returned no Trackmania frame")
++            return frame
++
++        def _screenshot_gdi(self, hwnd):
+             while True:  # avoids crashes when the window is reduced
+                 x, y, x1, y1 = win32gui.GetWindowRect(hwnd)
+                 w = x1 - x - self.w_diff
+@@ -51,22 +245,40 @@ if platform.system() == "Windows":
+             bitmap = win32ui.CreateBitmap()
+             bitmap.CreateCompatibleBitmap(dc, w, h)
+             oldbmp = memdc.SelectObject(bitmap)
+-            memdc.BitBlt((0, 0), (w, h), dc, self.borders, win32con.SRCCOPY)
+-            bits = bitmap.GetBitmapBits(True)
+-            img = (np.frombuffer(bits, dtype='uint8'))
+-            img.shape = (h, w, 4)
+-            memdc.SelectObject(oldbmp)  # avoids memory leak
+-            win32gui.DeleteObject(bitmap.GetHandle())
+-            memdc.DeleteDC()
+-            win32gui.ReleaseDC(hwnd, hdc)
+-            return img
++            try:
++                memdc.BitBlt((0, 0), (w, h), dc, self.borders, win32con.SRCCOPY)
++                bits = bitmap.GetBitmapBits(True)
++                img = np.frombuffer(bits, dtype="uint8")
++                img.shape = (h, w, 4)
++                return img
++            finally:
++                memdc.SelectObject(oldbmp)
++                win32gui.DeleteObject(bitmap.GetHandle())
++                memdc.DeleteDC()
++                dc.DeleteDC()
++                win32gui.ReleaseDC(hwnd, hdc)
++
++        def screenshot(self):
++            hwnd = getattr(self, "hwnd", None)
++            if not hwnd or not win32gui.IsWindow(hwnd):
++                hwnd = win32gui.FindWindow(None, self.window_name)
++                if hwnd != 0:
++                    self.hwnd = hwnd
++            assert hwnd != 0, f"Could not find a window named {self.window_name}."
++            if self.capture_backend == "dxcam":
++                return self._screenshot_dxcam(hwnd)
++            return self._screenshot_gdi(hwnd)
+ 
+         def move_and_resize(self, x=1, y=0, w=cfg.WINDOW_WIDTH, h=cfg.WINDOW_HEIGHT):
+             x += self.x_origin_offset
+             y += self.y_origin_offset
+             w += self.w_diff
+             h += self.h_diff
+-            hwnd = win32gui.FindWindow(None, self.window_name)
++            hwnd = getattr(self, "hwnd", None)
++            if not hwnd or not win32gui.IsWindow(hwnd):
++                hwnd = win32gui.FindWindow(None, self.window_name)
++                if hwnd != 0:
++                    self.hwnd = hwnd
+             assert hwnd != 0, f"Could not find a window named {self.window_name}."
+             win32gui.MoveWindow(hwnd, x, y, w, h, True)
+ 
+diff --git a/tmrl/custom/torch/custom_algorithms.py b/tmrl/custom/torch/custom_algorithms.py
+index 5fac0e9..246955d 100644
+--- a/tmrl/custom/torch/custom_algorithms.py
++++ b/tmrl/custom/torch/custom_algorithms.py
+@@ -6,6 +6,7 @@ from dataclasses import dataclass
+ # third-party imports
+ import numpy as np
+ import torch
++import torch.nn.functional as F
+ from torch.optim import Adam, AdamW, SGD
+ 
+ # local imports
+@@ -485,3 +486,462 @@ class REDQSACAgent(TrainingAgent):
+             ret_dict["entropy_coef"] = alpha_t.item()
+ 
+         return ret_dict
++
++
++# Experimental SAC auxiliary world model =================================================
++
++from tmrl.custom.torch.world_model import TorchLatentWorldModel, TorchLatentAdversaryProposer, symlog
++from tmrl.custom.torch.azr import ReplayLatentTaskBuffer, compute_azr_learnability
++
++
++@dataclass(eq=0)
++class DreamSACAgent(SpinupSACAgent):
++    """
++    SAC plus a gated replay-grounded AZR/imagination curriculum.
++
++    Real replay remains the source of truth for SAC and for fitting the world
++    model.  Candidate tasks are bounded perturbations of posterior states from
++    those real observations.  They are kept only when the model predicts
++    adequate continuation support, evaluated by repeated stochastic attempts,
++    and prioritized with the AZR learnability rule.  Imagination updates the
++    same action head returned by :meth:`get_actor`, so successful updates are
++    broadcast to rollout workers rather than remaining in a side policy.
++
++    These are model-space curriculum tasks, not generated TrackMania maps.  The
++    conservative warm-up, short horizon, support screening, age limit, and
++    small loss scale are intentional safeguards against model exploitation.
++    """
++    horizon: int = 3
++    lr_world_model: float = 3e-4
++    lr_adversary: float = 1e-4
++    free_nats: float = 1.0
++    enable_azr_imagination: bool = False
++    enable_latent_adversary: bool = False
++    world_model_warmup_steps: int = 1000
++    solver_attempts: int = 8
++    tasks_per_proposal: int = 8
++    task_batch_size: int = 8
++    task_buffer_capacity: int = 1024
++    task_max_age: int = 2000
++    task_proposal_interval: int = 4
++    imagination_interval: int = 2
++    min_task_continuation: float = 0.5
++    max_latent_perturbation: float = 0.25
++    target_quantile: float = 0.5
++    imagination_actor_scale: float = 0.05
++    imagination_reward_clip: float = 10.0
++    imagination_grad_clip: float = 10.0
++    azr_seed: int = 0
++
++    def __post_init__(self):
++        super().__post_init__()
++        actor = self.model.actor
++        if not hasattr(actor, "encode_observation") or not hasattr(actor, "forward_from_features"):
++            raise TypeError(
++                "DreamSACAgent requires an image actor exposing encode_observation() "
++                "and forward_from_features()."
++            )
++        if self.enable_latent_adversary and not self.enable_azr_imagination:
++            raise ValueError(
++                "enable_latent_adversary is no longer a standalone mode; enable the "
++                "validated AZR_IMAGINATION pipeline instead."
++            )
++        for name in (
++            "horizon",
++            "solver_attempts",
++            "tasks_per_proposal",
++            "task_batch_size",
++            "task_buffer_capacity",
++            "task_max_age",
++            "task_proposal_interval",
++            "imagination_interval",
++        ):
++            if int(getattr(self, name)) < 1:
++                raise ValueError(f"{name} must be positive")
++        if not 0.0 <= self.target_quantile <= 1.0:
++            raise ValueError("target_quantile must be in [0, 1]")
++
++        self.world_model = TorchLatentWorldModel(
++            img_channels=cfg.IMG_HIST_LEN,
++            img_height=cfg.IMG_HEIGHT,
++            img_width=cfg.IMG_WIDTH,
++            latent_dim=128,
++            action_dim=3,
++            hidden_dim=256,
++            policy_feature_dim=actor.feature_dim,
++        ).to(self.device)
++
++        self.adversary = TorchLatentAdversaryProposer(
++            feat_dim=384,
++            perturbation_dim=128,
++            max_magnitude=self.max_latent_perturbation,
++        ).to(self.device)
++
++        self.wm_optimizer = Adam(self.world_model.parameters(), lr=self.lr_world_model)
++        self.adversary_optimizer = Adam(self.adversary.parameters(), lr=self.lr_adversary)
++        self.task_buffer = ReplayLatentTaskBuffer(
++            capacity=self.task_buffer_capacity,
++            max_age=self.task_max_age,
++            seed=self.azr_seed,
++        )
++        self.world_model_updates = 0
++        self.azr_train_steps = 0
++        self._azr_activation_logged = False
++
++    def _empty_azr_metrics(self):
++        return {
++            "azr_ready": 0.0,
++            "azr_warmup_updates": float(self.world_model_updates),
++            "azr_warmup_remaining": float(
++                max(self.world_model_warmup_steps - self.world_model_updates, 0)
++            ),
++            "azr_warmup_fraction": float(
++                min(
++                    self.world_model_updates / max(self.world_model_warmup_steps, 1),
++                    1.0,
++                )
++            ),
++            "azr_tasks_proposed": 0.0,
++            "azr_tasks_accepted": 0.0,
++            "azr_task_buffer_size": float(len(self.task_buffer)),
++            "azr_mean_pass_rate": 0.0,
++            "azr_mean_learnability": 0.0,
++            "azr_mean_survival": 0.0,
++            "loss_adversary": 0.0,
++            "loss_imagination_actor": 0.0,
++            "mean_imagined_return": 0.0,
++            "imagined_policy_updates": 0.0,
++        }
++
++    def _alpha_for_actor(self):
++        if self.learn_entropy_coef:
++            return torch.exp(self.log_alpha.detach())
++        return self.alpha_t.detach()
++
++    def _set_world_model_grad(self, enabled):
++        for parameter in self.world_model.parameters():
++            parameter.requires_grad_(enabled)
++
++    def _posterior_start(self, obs):
++        embed = self.world_model.encoder(obs)
++        batch_size = embed.shape[0]
++        h = torch.zeros(
++            batch_size,
++            self.world_model.hidden_dim,
++            device=embed.device,
++            dtype=embed.dtype,
++        )
++        _, mean, std = self.world_model.rssm.compute_posterior(h, embed)
++        return h, mean, std, self.world_model.get_feature(h, mean)
++
++    def _rollout_tasks(self, h, z, attempts=1):
++        """Roll out exact task states; gradients are controlled by the caller."""
++        task_count = h.shape[0]
++        h = h.unsqueeze(0).expand(attempts, -1, -1).reshape(
++            attempts * task_count, h.shape[-1]
++        )
++        z = z.unsqueeze(0).expand(attempts, -1, -1).reshape(
++            attempts * task_count, z.shape[-1]
++        )
++        cumulative_return = torch.zeros(h.shape[0], device=h.device, dtype=h.dtype)
++        cumulative_log_prob = torch.zeros_like(cumulative_return)
++        survival = torch.ones_like(cumulative_return)
++        discount = 1.0
++
++        for _ in range(self.horizon):
++            feature = self.world_model.get_feature(h, z)
++            policy_feature = self.world_model.predict_policy_feature(feature)
++            action, log_prob = self.model.actor.forward_from_features(policy_feature)
++            h, z, reward, continuation, _ = self.world_model.imagine_step(h, z, action)
++            reward = reward.squeeze(-1).clamp(
++                -self.imagination_reward_clip, self.imagination_reward_clip
++            )
++            continuation = continuation.squeeze(-1).clamp(0.0, 1.0)
++            cumulative_return = cumulative_return + discount * survival * reward
++            cumulative_log_prob = cumulative_log_prob + discount * survival * log_prob
++            survival = survival * continuation
++            discount *= self.gamma
++
++        shape = (attempts, task_count)
++        return (
++            cumulative_return.reshape(shape),
++            survival.reshape(shape),
++            cumulative_log_prob.reshape(shape),
++        )
++
++    @staticmethod
++    def _gaussian_kl(p_mean, p_std, q_mean, q_std):
++        """KL(N(p)||N(q)), reduced over the latent dimension."""
++        p_var = p_std.square()
++        q_var = q_std.square()
++        elem = (
++            torch.log(q_std / (p_std + 1e-6))
++            + (p_var + (p_mean - q_mean).square()) / (2.0 * q_var + 1e-6)
++            - 0.5
++        )
++        return elem.sum(dim=-1)
++
++    def _train_world_model(self, o, a, r, o2, d, truncated):
++        if not isinstance(o, (tuple, list)) or len(o) < 4:
++            raise ValueError("DreamSACAgent world-model training requires image observations")
++
++        embed = self.world_model.encoder(o)
++        next_embed = self.world_model.encoder(o2)
++        batch_size = embed.shape[0]
++
++        h0 = torch.zeros(batch_size, 256, device=embed.device, dtype=embed.dtype)
++        z0, _, _ = self.world_model.rssm.compute_posterior(h0, embed)
++        h1 = self.world_model.rssm.step_deterministic(h0, z0, a)
++        _, prior_mean, prior_std = self.world_model.rssm.compute_prior(h1)
++        z_post, post_mean, post_std = self.world_model.rssm.compute_posterior(h1, next_embed)
++
++        feat0 = self.world_model.get_feature(h0, z0)
++        feat1 = self.world_model.get_feature(h1, z_post)
++        pred_reward = self.world_model.predict_reward(feat1)
++        pred_continue = self.world_model.predict_continuation(feat1)
++
++        pred_embedding0 = self.world_model.predict_embedding(feat0)
++        pred_embedding1 = self.world_model.predict_embedding(feat1)
++        pred_policy_feature0 = self.world_model.predict_policy_feature_symlog(feat0)
++        pred_policy_feature1 = self.world_model.predict_policy_feature_symlog(feat1)
++        with torch.no_grad():
++            policy_feature0 = self.model.actor.encode_observation(o)
++            policy_feature1 = self.model.actor.encode_observation(o2)
++
++        reward_target = r.reshape(batch_size, 1).to(dtype=pred_reward.dtype)
++        done = d.reshape(batch_size, 1).to(dtype=pred_continue.dtype)
++        if truncated is not None:
++            trunc = truncated.reshape(batch_size, 1).to(dtype=pred_continue.dtype)
++            done = torch.maximum(done, trunc)
++        continue_target = 1.0 - done
++
++        loss_reward = F.mse_loss(pred_reward, symlog(reward_target))
++        loss_continue = F.binary_cross_entropy(pred_continue, continue_target)
++        loss_embedding = 0.5 * (
++            F.mse_loss(pred_embedding0, embed.detach())
++            + F.mse_loss(pred_embedding1, next_embed.detach())
++        )
++        loss_policy_feature = 0.5 * (
++            F.smooth_l1_loss(pred_policy_feature0, symlog(policy_feature0.detach()))
++            + F.smooth_l1_loss(pred_policy_feature1, symlog(policy_feature1.detach()))
++        )
++
++        kl_dyn = self._gaussian_kl(
++            post_mean.detach(), post_std.detach(), prior_mean, prior_std
++        )
++        kl_rep = self._gaussian_kl(
++            post_mean, post_std, prior_mean.detach(), prior_std.detach()
++        )
++        free_nats = torch.as_tensor(self.free_nats, device=embed.device, dtype=embed.dtype)
++        loss_kl_dyn = torch.maximum(kl_dyn, free_nats).mean()
++        loss_kl_rep = torch.maximum(kl_rep, free_nats).mean()
++
++        loss_model = (
++            loss_reward
++            + loss_continue
++            + loss_embedding
++            + loss_policy_feature
++            + loss_kl_dyn
++            + 0.1 * loss_kl_rep
++        )
++
++        self.wm_optimizer.zero_grad(set_to_none=True)
++        loss_model.backward()
++        torch.nn.utils.clip_grad_norm_(self.world_model.parameters(), max_norm=100.0)
++        self.wm_optimizer.step()
++        self.world_model_updates += 1
++
++        return {
++            "loss_world_model": loss_model.detach().item(),
++            "loss_wm_reward": loss_reward.detach().item(),
++            "loss_wm_continue": loss_continue.detach().item(),
++            "loss_wm_embedding": loss_embedding.detach().item(),
++            "loss_wm_policy_feature": loss_policy_feature.detach().item(),
++            "loss_wm_kl_dyn": loss_kl_dyn.detach().item(),
++            "loss_wm_kl_rep": loss_kl_rep.detach().item(),
++        }
++
++    def _propose_and_validate_tasks(self, obs):
++        metrics = self._empty_azr_metrics()
++        with torch.no_grad():
++            h, z_mean, z_std, feature = self._posterior_start(obs)
++        task_count = min(self.tasks_per_proposal, h.shape[0])
++        indices = torch.randperm(h.shape[0], device=h.device)[:task_count]
++        h = h[indices]
++        z_mean = z_mean[indices]
++        z_std = z_std[indices]
++        feature = feature[indices].detach()
++
++        perturbation, proposal_log_prob = self.adversary.sample(feature)
++        # The proposal is measured in posterior standard deviations, keeping it
++        # inside a small local support region around a real replay observation.
++        task_z = z_mean + perturbation * z_std
++
++        with torch.no_grad():
++            returns, survival, _ = self._rollout_tasks(
++                h.detach(), task_z.detach(), attempts=self.solver_attempts
++            )
++            target_return = torch.quantile(
++                returns, self.target_quantile, dim=0
++            )
++            successes = (
++                (returns > target_return.unsqueeze(0))
++                & (survival >= self.min_task_continuation)
++            ).float()
++            learnability, pass_rate = compute_azr_learnability(successes)
++            mean_survival = survival.mean(dim=0)
++            finite = (
++                torch.isfinite(returns).all(dim=0)
++                & torch.isfinite(survival).all(dim=0)
++                & torch.isfinite(target_return)
++            )
++            in_support = perturbation.detach().abs().amax(dim=-1) <= (
++                self.max_latent_perturbation + 1e-6
++            )
++            valid = finite & in_support & (mean_survival >= self.min_task_continuation)
++
++        signal = learnability.detach() * valid.float()
++        loss_adversary = torch.zeros((), device=h.device)
++        if signal.sum() > 0.0:
++            loss_adversary = -(signal * proposal_log_prob).sum() / valid.float().sum().clamp_min(1.0)
++            self.adversary_optimizer.zero_grad(set_to_none=True)
++            loss_adversary.backward()
++            torch.nn.utils.clip_grad_norm_(self.adversary.parameters(), max_norm=10.0)
++            self.adversary_optimizer.step()
++
++        accepted = self.task_buffer.add_batch(
++            h=h,
++            z=task_z,
++            target_returns=target_return,
++            priorities=learnability,
++            pass_rates=pass_rate,
++            mean_survival=mean_survival,
++            valid=valid,
++            current_step=self.azr_train_steps,
++        )
++        metrics.update(
++            azr_tasks_proposed=float(task_count),
++            azr_tasks_accepted=float(accepted),
++            azr_task_buffer_size=float(len(self.task_buffer)),
++            azr_mean_pass_rate=pass_rate.mean().item(),
++            azr_mean_learnability=learnability.mean().item(),
++            azr_mean_survival=mean_survival.mean().item(),
++            loss_adversary=loss_adversary.detach().item(),
++        )
++        return metrics
++
++    def _refresh_tasks_and_train_actor(self):
++        metrics = self._empty_azr_metrics()
++        if len(self.task_buffer) == 0:
++            return metrics
++
++        task_ids, h, z, target, _ = self.task_buffer.sample(
++            batch_size=self.task_batch_size,
++            device=self.device,
++            current_step=self.azr_train_steps,
++        )
++        with torch.no_grad():
++            returns, survival, _ = self._rollout_tasks(
++                h, z, attempts=self.solver_attempts
++            )
++            successes = (
++                (returns > target.unsqueeze(0))
++                & (survival >= self.min_task_continuation)
++            ).float()
++            learnability, pass_rate = compute_azr_learnability(successes)
++            mean_survival = survival.mean(dim=0)
++            valid = (
++                torch.isfinite(returns).all(dim=0)
++                & torch.isfinite(survival).all(dim=0)
++                & (mean_survival >= self.min_task_continuation)
++            )
++            priorities = torch.where(valid, learnability, torch.zeros_like(learnability))
++        self.task_buffer.update(
++            task_ids=task_ids,
++            priorities=priorities,
++            pass_rates=pass_rate,
++            mean_survival=mean_survival,
++            current_step=self.azr_train_steps,
++        )
++
++        active = priorities > 0.0
++        loss_actor = torch.zeros((), device=h.device)
++        imagined_return = torch.zeros((), device=h.device)
++        updated = 0.0
++        if active.any():
++            h_active = h[active].detach()
++            z_active = z[active].detach()
++            weights = priorities[active].detach()
++            weights = weights / weights.mean().clamp_min(1e-6)
++
++            # Freeze model parameters while retaining derivatives from actions
++            # through the dynamics.  Only the deployed actor is optimized.
++            self._set_world_model_grad(False)
++            try:
++                imagined_returns, _, log_probs = self._rollout_tasks(
++                    h_active, z_active, attempts=1
++                )
++                imagined_return = imagined_returns[0].mean()
++                alpha = self._alpha_for_actor()
++                loss_actor = self.imagination_actor_scale * (
++                    weights * (alpha * log_probs[0] - imagined_returns[0])
++                ).mean()
++                self.pi_optimizer.zero_grad(set_to_none=True)
++                loss_actor.backward()
++                torch.nn.utils.clip_grad_norm_(
++                    self.model.actor.parameters(), max_norm=self.imagination_grad_clip
++                )
++                self.pi_optimizer.step()
++                updated = 1.0
++            finally:
++                self._set_world_model_grad(True)
++
++        metrics.update(
++            azr_task_buffer_size=float(len(self.task_buffer)),
++            azr_mean_pass_rate=pass_rate.mean().item(),
++            azr_mean_learnability=learnability.mean().item(),
++            azr_mean_survival=mean_survival.mean().item(),
++            loss_imagination_actor=loss_actor.detach().item(),
++            mean_imagined_return=imagined_return.detach().item(),
++            imagined_policy_updates=updated,
++        )
++        return metrics
++
++    def train(self, batch):
++        o, a, r, o2, d, truncated = batch
++        world_model_metrics = self._train_world_model(o, a, r, o2, d, truncated)
++        metrics = super().train(batch)
++        metrics.update(world_model_metrics)
++        azr_metrics = self._empty_azr_metrics()
++        self.azr_train_steps += 1
++
++        ready = (
++            self.enable_azr_imagination
++            and self.world_model_updates >= self.world_model_warmup_steps
++        )
++        if ready and not self._azr_activation_logged:
++            logging.info(
++                "AZR imagination activated after %s world-model updates; "
++                "task proposal and screened actor updates are now enabled.",
++                self.world_model_updates,
++            )
++            self._azr_activation_logged = True
++        azr_metrics["azr_ready"] = float(ready)
++        if ready and self.azr_train_steps % self.task_proposal_interval == 0:
++            azr_metrics.update(self._propose_and_validate_tasks(o))
++            azr_metrics["azr_ready"] = 1.0
++        if (
++            ready
++            and len(self.task_buffer) > 0
++            and self.azr_train_steps % self.imagination_interval == 0
++        ):
++            proposal_metrics = azr_metrics.copy()
++            azr_metrics.update(self._refresh_tasks_and_train_actor())
++            # Preserve counts/loss from a proposal performed on the same step.
++            for key in ("azr_tasks_proposed", "azr_tasks_accepted", "loss_adversary"):
++                azr_metrics[key] = proposal_metrics[key]
++            azr_metrics["azr_ready"] = 1.0
++
++        azr_metrics["azr_task_buffer_size"] = float(len(self.task_buffer))
++        metrics.update(azr_metrics)
++        return metrics
+diff --git a/tmrl/custom/torch/custom_checkpoints.py b/tmrl/custom/torch/custom_checkpoints.py
+index e11461c..a0975b8 100644
+--- a/tmrl/custom/torch/custom_checkpoints.py
++++ b/tmrl/custom/torch/custom_checkpoints.py
+@@ -63,9 +63,66 @@ def update_memory(run_instance):
+         run_instance.memory.batch_size = batch_size
+         run_instance.memory.memory_size = memory_size
+         logging.info(f"Memory updated with steps:{steps}, batch size:{batch_size}, memory size:{memory_size}.")
++
++    # Trim loaded memory if it exceeds the target memory size to free system RAM
++    if hasattr(run_instance, "memory") and hasattr(run_instance.memory, "data") and len(run_instance.memory.data) > 0:
++        current_len = len(run_instance.memory)
++        to_trim = current_len - int(memory_size)
++        if to_trim > 0:
++            for i in range(len(run_instance.memory.data)):
++                arr = run_instance.memory.data[i]
++                if isinstance(arr, torch.Tensor):
++                    run_instance.memory.data[i] = arr[to_trim:].clone()
++                elif isinstance(arr, np.ndarray):
++                    run_instance.memory.data[i] = arr[to_trim:].copy()
++                else:
++                    run_instance.memory.data[i] = arr[to_trim:]
++            logging.info(f"Trimmed loaded replay buffer from {current_len} down to {len(run_instance.memory)} samples to prevent RAM exhaustion.")
+     return run_instance
+ 
+ 
++def dump_dreamer_run_instance(run_instance, checkpoint_path):
++    """
++    Safely dumps the TorchDreamer trainer checkpoint.
++    Guarantees replay memory is trimmed to memory_size before serialization
++    to eliminate MemoryError during torch storage pickling.
++    """
++    memory_size = int(cfg.TMRL_CONFIG.get("MEMORY_SIZE", 50000))
++    if hasattr(run_instance, "memory") and hasattr(run_instance.memory, "data") and len(run_instance.memory.data) > 0:
++        current_len = len(run_instance.memory)
++        to_trim = current_len - memory_size
++        if to_trim > 0:
++            for i in range(len(run_instance.memory.data)):
++                arr = run_instance.memory.data[i]
++                if isinstance(arr, torch.Tensor):
++                    run_instance.memory.data[i] = arr[to_trim:].clone()
++                elif isinstance(arr, np.ndarray):
++                    run_instance.memory.data[i] = arr[to_trim:].copy()
++                else:
++                    run_instance.memory.data[i] = arr[to_trim:]
++            logging.info(f"Trimmed replay buffer from {current_len} to {len(run_instance.memory)} samples before checkpointing.")
++
++    try:
++        dump(run_instance, checkpoint_path)
++    except MemoryError:
++        logging.warning("MemoryError during standard dump! Trimming replay buffer to 25,000 samples and retrying...")
++        if hasattr(run_instance, "memory") and hasattr(run_instance.memory, "data") and len(run_instance.memory.data) > 0:
++            to_trim = max(0, len(run_instance.memory) - 25000)
++            for i in range(len(run_instance.memory.data)):
++                arr = run_instance.memory.data[i]
++                if isinstance(arr, torch.Tensor):
++                    run_instance.memory.data[i] = arr[to_trim:].clone()
++                elif isinstance(arr, np.ndarray):
++                    run_instance.memory.data[i] = arr[to_trim:].copy()
++                else:
++                    run_instance.memory.data[i] = arr[to_trim:]
++        dump(run_instance, checkpoint_path)
++
++
++def load_dreamer_run_instance(checkpoint_path):
++    return load(checkpoint_path)
++
++
+ def update_run_instance(run_instance, training_cls):
+     """
+     Updates the checkpoint after loading with compatible values from config.json
+@@ -88,7 +145,7 @@ def update_run_instance(run_instance, training_cls):
+     # update training Agent:
+     ALG_CONFIG = cfg.TMRL_CONFIG["ALG"]
+     ALG_NAME = ALG_CONFIG["ALGORITHM"]
+-    assert ALG_NAME in ["SAC", "REDQSAC"], f"{ALG_NAME} is not supported by this checkpoint updater."
++    assert ALG_NAME in ["SAC", "REDQSAC", "DREAMER"], f"{ALG_NAME} is not supported by this checkpoint updater."
+ 
+     if ALG_NAME in ["SAC", "REDQSAC"]:
+         lr_actor = ALG_CONFIG["LR_ACTOR"]
+@@ -159,6 +216,59 @@ def update_run_instance(run_instance, training_cls):
+                 run_instance.agent.m = m
+                 logging.info(f"M switched to {m} (old: {old}).")
+ 
++    elif ALG_NAME == "DREAMER":
++        dreamer_cfg = ALG_CONFIG.get("DREAMER", {})
++        warmup_steps = int(dreamer_cfg.get("WARMUP_STEPS", 100))
++        if hasattr(run_instance.agent, "world_model_warmup_steps") and run_instance.agent.world_model_warmup_steps != warmup_steps:
++            old_warmup = run_instance.agent.world_model_warmup_steps
++            run_instance.agent.world_model_warmup_steps = warmup_steps
++            logging.info(f"Dreamer warmup steps updated to {warmup_steps} (old: {old_warmup}).")
++
++        # Migrate legacy checkpoints away from the failure mode where Dreamer's
++        # world-model optimizer rewrote the demonstrated visual driving policy.
++        # The worker also remains foundation-only until that gate is explicitly
++        # disabled after closed-loop evaluation.
++        agent = run_instance.agent
++        if hasattr(agent, "configure_foundation_safety"):
++            agent.foundation_weights_path = ALG_CONFIG.get(
++                "FOUNDATION_WEIGHTS_PATH",
++                "weights/car_brain_1m_curriculum/car_brain_multimodal.pt",
++            )
++            agent.lr_foundation = float(dreamer_cfg.get("LR_FOUNDATION", 0.0))
++            agent.reload_foundation_on_actor_load = bool(
++                dreamer_cfg.get("RELOAD_FOUNDATION_ON_ACTOR_LOAD", True)
++            )
++            freeze_foundation = bool(
++                dreamer_cfg.get("FREEZE_FOUNDATION", True)
++            )
++            foundation_only = bool(dreamer_cfg.get("FOUNDATION_ONLY", True))
++            foundation_discrete_actions = bool(
++                dreamer_cfg.get("FOUNDATION_DISCRETE_ACTIONS", False)
++            )
++            foundation_steer_threshold = float(
++                dreamer_cfg.get("FOUNDATION_STEER_THRESHOLD", 0.05)
++            )
++            residual_scale = float(dreamer_cfg.get("RESIDUAL_SCALE", 0.25))
++            agent.configure_foundation_safety(
++                freeze_foundation=freeze_foundation,
++                foundation_only=foundation_only,
++                foundation_discrete_actions=foundation_discrete_actions,
++                foundation_steer_threshold=foundation_steer_threshold,
++                residual_scale=residual_scale,
++                reload_weights=True,
++            )
++            logging.info(
++                "Dreamer foundation safety applied: frozen=%s, "
++                "foundation_only=%s, discrete_actions=%s, "
++                "steer_threshold=%s, residual_scale=%s, source=%s.",
++                freeze_foundation,
++                foundation_only,
++                foundation_discrete_actions,
++                foundation_steer_threshold,
++                residual_scale,
++                agent.foundation_weights_path,
++            )
++
+     epochs = cfg.TMRL_CONFIG["MAX_EPOCHS"]
+     rounds = cfg.TMRL_CONFIG["ROUNDS_PER_EPOCH"]
+     update_model_interval = cfg.TMRL_CONFIG["UPDATE_MODEL_INTERVAL"]
+diff --git a/tmrl/custom/torch/custom_memories.py b/tmrl/custom/torch/custom_memories.py
+index 77aeb4d..b807a07 100644
+--- a/tmrl/custom/torch/custom_memories.py
++++ b/tmrl/custom/torch/custom_memories.py
+@@ -1,12 +1,22 @@
++import logging
+ import random
+ import time
+ from typing import List, Tuple
+ 
+ import numpy as np
+ import torch
++import torch.nn.functional as F
+ 
+ from tmrl.core.memory import BaseMemory, check_samples_crc
+ from tmrl.core.torch.memory import TorchMemory
++from tmrl.custom.torch.poincare_memory import (
++    REPLAY_SAMPLER_DEFAULTS,
++    greedy_diverse_subset,
++    mean_off_diagonal,
++    pairwise_euclidean_distance,
++    pairwise_poincare_distance,
++    poincare_expmap0,
++)
+ 
+ 
+ # LOCAL BUFFER COMPRESSION ==============================
+@@ -1346,6 +1356,576 @@ class ArrayTorchMemoryTMFull(BaseMemory):
+         return "index", "load_acts", "load_imgs", "fix_histories", "pin_memory", "move_to_device", "assemble"
+ 
+ 
++class ArrayTorchMemoryTMFullSequence(ArrayTorchMemoryTMFull):
++    """Episode-safe contiguous sequence sampler for recurrent world models.
++
++    The underlying storage remains identical to :class:`ArrayTorchMemoryTMFull`,
++    so existing replay checkpoints can be reused when switching algorithms.
++    Returned tensors have leading dimensions ``[batch, time, ...]`` and an
++    additional ``is_first`` mask marks the truncated recurrent start of each
++    sampled sequence.
++    """
++
++    _REPLAY_MODE_CODES = {"uniform": 0.0, "euclidean": 1.0, "poincare": 2.0}
++
++    def __init__(
++        self,
++        sequence_length=16,
++        replay_sampler="uniform",
++        replay_candidate_count=128,
++        replay_uniform_fraction=0.25,
++        replay_embedding_dim=16,
++        replay_curvature=1.0,
++        replay_tangent_scale=0.75,
++        replay_max_radius=0.95,
++        replay_seed=0,
++        **kwargs,
++    ):
++        self.sequence_length = int(sequence_length)
++        if self.sequence_length < 2:
++            raise ValueError("sequence_length must be at least 2")
++        super().__init__(**kwargs)
++
++        self._replay_projection = None
++        self._replay_projection_shape = None
++        self._replay_sampler_calls = 0
++        self._replay_distance_total = 0.0
++        self._replay_radius_total = 0.0
++        self._replay_candidate_total = 0.0
++        self.configure_replay_sampler(
++            replay_sampler=replay_sampler,
++            replay_candidate_count=replay_candidate_count,
++            replay_uniform_fraction=replay_uniform_fraction,
++            replay_embedding_dim=replay_embedding_dim,
++            replay_curvature=replay_curvature,
++            replay_tangent_scale=replay_tangent_scale,
++            replay_max_radius=replay_max_radius,
++            replay_seed=replay_seed,
++        )
++
++    @staticmethod
++    def _normalize_replay_sampler(mode):
++        mode = str(mode).strip().lower()
++        if mode in {"hyperbolic", "poincarÃ©"}:
++            mode = "poincare"
++        if mode not in {"uniform", "euclidean", "poincare"}:
++            raise ValueError(
++                "replay_sampler must be 'uniform', 'euclidean', or 'poincare'"
++            )
++        return mode
++
++    def configure_replay_sampler(
++        self,
++        replay_sampler="uniform",
++        replay_candidate_count=128,
++        replay_uniform_fraction=0.25,
++        replay_embedding_dim=16,
++        replay_curvature=1.0,
++        replay_tangent_scale=0.75,
++        replay_max_radius=0.95,
++        replay_seed=0,
++    ):
++        """Configure the detached sequence-selection index.
++
++        Returns ``True`` when the effective configuration changed.  This is
++        intentionally separate from replay storage so checkpoint migration can
++        apply new sampling settings without rewriting stored transitions.
++        """
++        mode = self._normalize_replay_sampler(replay_sampler)
++        candidate_count = int(replay_candidate_count)
++        uniform_fraction = float(replay_uniform_fraction)
++        embedding_dim = int(replay_embedding_dim)
++        curvature = float(replay_curvature)
++        tangent_scale = float(replay_tangent_scale)
++        max_radius = float(replay_max_radius)
++        seed = int(replay_seed)
++
++        if candidate_count < 1:
++            raise ValueError("replay_candidate_count must be positive")
++        if not np.isfinite(uniform_fraction) or not 0.0 <= uniform_fraction <= 1.0:
++            raise ValueError("replay_uniform_fraction must be between 0 and 1")
++        if embedding_dim < 2:
++            raise ValueError("replay_embedding_dim must be at least 2")
++        if not np.isfinite(curvature) or curvature <= 0.0:
++            raise ValueError("replay_curvature must be finite and positive")
++        if not np.isfinite(tangent_scale) or tangent_scale <= 0.0:
++            raise ValueError("replay_tangent_scale must be finite and positive")
++        if not np.isfinite(max_radius) or not 0.0 < max_radius < 1.0:
++            raise ValueError("replay_max_radius must be between 0 and 1")
++
++        configuration = (
++            mode,
++            candidate_count,
++            uniform_fraction,
++            embedding_dim,
++            curvature,
++            tangent_scale,
++            max_radius,
++            seed,
++        )
++        previous = tuple(
++            getattr(self, name, None)
++            for name in (
++                "replay_sampler",
++                "replay_candidate_count",
++                "replay_uniform_fraction",
++                "replay_embedding_dim",
++                "replay_curvature",
++                "replay_tangent_scale",
++                "replay_max_radius",
++                "replay_seed",
++            )
++        )
++        projection_changed = (
++            getattr(self, "replay_embedding_dim", None) != embedding_dim
++            or getattr(self, "replay_seed", None) != seed
++        )
++
++        (
++            self.replay_sampler,
++            self.replay_candidate_count,
++            self.replay_uniform_fraction,
++            self.replay_embedding_dim,
++            self.replay_curvature,
++            self.replay_tangent_scale,
++            self.replay_max_radius,
++            self.replay_seed,
++        ) = configuration
++
++        if projection_changed or not hasattr(self, "_replay_projection"):
++            self._replay_projection = None
++            self._replay_projection_shape = None
++        for name, initial in (
++            ("_replay_sampler_calls", 0),
++            ("_replay_distance_total", 0.0),
++            ("_replay_radius_total", 0.0),
++            ("_replay_candidate_total", 0.0),
++        ):
++            if not hasattr(self, name):
++                setattr(self, name, initial)
++
++        changed = previous != configuration
++        if changed:
++            logging.info(
++                "Dreamer replay sampler configured: mode=%s, candidates=%d, "
++                "uniform_fraction=%.2f, embed_dim=%d, curvature=%.3f.",
++                mode,
++                candidate_count,
++                uniform_fraction,
++                embedding_dim,
++                curvature,
++            )
++        return changed
++
++    def _ensure_replay_sampler_state(self):
++        """Supply defaults when loading a checkpoint created before this index."""
++        missing_configuration = any(
++            not hasattr(self, name)
++            for name in (
++                "replay_sampler",
++                "replay_candidate_count",
++                "replay_uniform_fraction",
++                "replay_embedding_dim",
++                "replay_curvature",
++                "replay_tangent_scale",
++                "replay_max_radius",
++                "replay_seed",
++            )
++        )
++        if missing_configuration:
++            configuration = {
++                name: getattr(self, name, default)
++                for name, default in REPLAY_SAMPLER_DEFAULTS.items()
++            }
++            self.configure_replay_sampler(**configuration)
++            return
++
++        if not hasattr(self, "_replay_projection"):
++            self._replay_projection = None
++            self._replay_projection_shape = None
++        for name, initial in (
++            ("_replay_sampler_calls", 0),
++            ("_replay_distance_total", 0.0),
++            ("_replay_radius_total", 0.0),
++            ("_replay_candidate_total", 0.0),
++        ):
++            if not hasattr(self, name):
++                setattr(self, name, initial)
++
++    def _sample_episode_safe_starts(self, count):
++        max_start_exclusive = len(self) - self.sequence_length + 1
++        if max_start_exclusive <= 0:
++            raise RuntimeError(
++                f"Replay needs at least {self.sequence_length + self.min_samples} "
++                "samples before sequence training."
++            )
++
++        count = int(count)
++        replace = max_start_exclusive < count or self.replace
++        starts = self.rng.choice(
++            a=max_start_exclusive,
++            size=count,
++            replace=replace,
++            shuffle=self.shuffle,
++        )
++        offsets = self.min_samples - 1 + np.arange(self.sequence_length)
++
++        # eoe at idx_last means this transition would jump from a terminal
++        # sample to the next episode. A terminal idx_now is allowed only at the
++        # final transition because it appears as idx_last on the following step.
++        invalid = self.data[4][starts[:, np.newaxis] + offsets].any(axis=1)
++        attempts = 0
++        while np.any(invalid):
++            count_invalid = int(invalid.sum())
++            starts[invalid] = self.rng.choice(
++                a=max_start_exclusive,
++                size=count_invalid,
++                replace=True,
++                shuffle=self.shuffle,
++            )
++            invalid = self.data[4][starts[:, np.newaxis] + offsets].any(axis=1)
++            attempts += 1
++            if attempts >= 1000:
++                raise RuntimeError(
++                    "Could not find enough episode-safe replay sequences; "
++                    "reduce DREAMER.SEQUENCE_LENGTH or collect longer episodes."
++                )
++        return np.asarray(starts, dtype=np.int64)
++
++    @staticmethod
++    def _series_summary(series):
++        series = series.reshape(series.shape[0], series.shape[1], -1).mean(dim=-1)
++        return torch.stack(
++            (
++                series.mean(dim=1),
++                series.std(dim=1, unbiased=False),
++                series[:, 0],
++                series[:, -1],
++                series[:, -1] - series[:, 0],
++                series.amin(dim=1),
++                series.amax(dim=1),
++            ),
++            dim=1,
++        )
++
++    def _sequence_descriptors(self, starts):
++        """Build cheap, detached descriptors for candidate replay sequences."""
++        starts = np.asarray(starts, dtype=np.int64)
++        sequence_indices = starts[:, np.newaxis] + self.min_samples + np.arange(
++            self.sequence_length
++        )
++        sequence_indices = torch.as_tensor(sequence_indices, dtype=torch.long)
++        candidate_count = len(starts)
++
++        actions = self.data[1][sequence_indices].detach().float().cpu()
++        actions = actions.reshape(candidate_count, self.sequence_length, -1)
++        action_summary = torch.cat(
++            (
++                actions.mean(dim=1),
++                actions.std(dim=1, unbiased=False),
++                actions[:, 0],
++                actions[:, -1],
++                actions[:, -1] - actions[:, 0],
++            ),
++            dim=1,
++        )
++        speed = self.data[2][sequence_indices].detach().float().cpu() / 300.0
++        gear = self.data[7][sequence_indices].detach().float().cpu() / 6.0
++        rpm = self.data[8][sequence_indices].detach().float().cpu() / 10000.0
++        reward = self.data[5][sequence_indices].detach().float().cpu()
++        reward = torch.sign(reward) * torch.log1p(reward.abs())
++
++        center_indices = sequence_indices[:, self.sequence_length // 2]
++        images = self.data[3][center_indices].detach().float().cpu() / 256.0
++        if images.ndim == 2:
++            images = images.reshape(candidate_count, 1, 1, -1)
++        elif images.ndim == 3:
++            images = images.unsqueeze(1)
++        else:
++            images = images.reshape(
++                candidate_count, -1, images.shape[-2], images.shape[-1]
++            ).mean(dim=1, keepdim=True)
++        coarse_image = F.adaptive_avg_pool2d(images, (2, 2)).flatten(start_dim=1)
++        image_std = images.flatten(start_dim=1).std(dim=1, unbiased=False).unsqueeze(1)
++
++        descriptor = torch.cat(
++            (
++                action_summary,
++                self._series_summary(speed),
++                self._series_summary(gear),
++                self._series_summary(rpm),
++                self._series_summary(reward),
++                coarse_image,
++                image_std,
++            ),
++            dim=1,
++        )
++        return descriptor.numpy().astype(np.float32, copy=False)
++
++    def _project_replay_descriptors(self, descriptors):
++        descriptors = np.asarray(descriptors, dtype=np.float32)
++        center = descriptors.mean(axis=0, keepdims=True)
++        scale = descriptors.std(axis=0, keepdims=True)
++        standardized = np.clip(
++            (descriptors - center) / np.maximum(scale, 1e-5), -6.0, 6.0
++        )
++
++        projection_shape = (standardized.shape[1], self.replay_embedding_dim)
++        if (
++            self._replay_projection is None
++            or self._replay_projection_shape != projection_shape
++        ):
++            projection_seed = (
++                self.replay_seed
++                + 1009 * projection_shape[0]
++                + 9176 * projection_shape[1]
++            ) % (2**32)
++            projection_rng = np.random.default_rng(projection_seed)
++            self._replay_projection = projection_rng.normal(
++                0.0,
++                1.0 / np.sqrt(projection_shape[0]),
++                size=projection_shape,
++            ).astype(np.float32)
++            self._replay_projection_shape = projection_shape
++
++        tangent = standardized @ self._replay_projection
++        tangent *= self.replay_tangent_scale / np.sqrt(self.replay_embedding_dim)
++        return tangent.astype(np.float32, copy=False)
++
++    def _record_replay_metrics(self, candidate_count, distance, radius):
++        self._replay_sampler_calls += 1
++        self._replay_candidate_total += float(candidate_count)
++        self._replay_distance_total += float(distance)
++        self._replay_radius_total += float(radius)
++
++    def _sample_diverse_sequence_starts(self):
++        candidates = self._sample_episode_safe_starts(
++            max(self.batch_size, self.replay_candidate_count)
++        )
++        _, first_positions = np.unique(candidates, return_index=True)
++        unique_starts = candidates[np.sort(first_positions)]
++        descriptors = self._sequence_descriptors(unique_starts)
++        tangent = self._project_replay_descriptors(descriptors)
++
++        if self.replay_sampler == "poincare":
++            points = poincare_expmap0(
++                tangent,
++                curvature=self.replay_curvature,
++                max_radius=self.replay_max_radius,
++            )
++            distances = pairwise_poincare_distance(
++                points, curvature=self.replay_curvature
++            )
++            radii = np.sqrt(self.replay_curvature) * np.linalg.norm(points, axis=1)
++        else:
++            points = tangent
++            distances = pairwise_euclidean_distance(points)
++            radii = np.linalg.norm(points, axis=1)
++
++        selection_count = min(self.batch_size, len(unique_starts))
++        anchor_count = max(
++            1,
++            int(round(selection_count * self.replay_uniform_fraction)),
++        )
++        selected = greedy_diverse_subset(
++            distances,
++            selection_count,
++            self.rng,
++            initial_count=anchor_count,
++        )
++        starts = unique_starts[selected]
++        if len(starts) < self.batch_size:
++            starts = np.concatenate(
++                (
++                    starts,
++                    self.rng.choice(
++                        candidates,
++                        size=self.batch_size - len(starts),
++                        replace=True,
++                    ),
++                )
++            )
++
++        selected_distances = distances[np.ix_(selected, selected)]
++        self._record_replay_metrics(
++            candidate_count=len(unique_starts),
++            distance=mean_off_diagonal(selected_distances),
++            radius=float(radii[selected].mean()) if len(selected) else 0.0,
++        )
++        return np.asarray(starts, dtype=np.int64)
++
++    def sample_sequence_indices(self):
++        self._ensure_replay_sampler_state()
++        if self.replay_sampler == "uniform":
++            starts = self._sample_episode_safe_starts(self.batch_size)
++            self._record_replay_metrics(
++                candidate_count=len(starts), distance=0.0, radius=0.0
++            )
++            return starts
++        return self._sample_diverse_sequence_starts()
++
++    def get_benchmarks(self):
++        self._ensure_replay_sampler_state()
++        base_benchmarks = tuple(super().get_benchmarks())
++        # The parent has a legacy five-value empty branch despite seven names.
++        if len(base_benchmarks) < 7:
++            base_benchmarks += (0.0,) * (7 - len(base_benchmarks))
++
++        calls = self._replay_sampler_calls
++        if calls:
++            candidate_count = self._replay_candidate_total / calls
++            mean_distance = self._replay_distance_total / calls
++            mean_radius = self._replay_radius_total / calls
++        else:
++            candidate_count = mean_distance = mean_radius = 0.0
++        self._replay_sampler_calls = 0
++        self._replay_candidate_total = 0.0
++        self._replay_distance_total = 0.0
++        self._replay_radius_total = 0.0
++        return (
++            *base_benchmarks,
++            self._REPLAY_MODE_CODES[self.replay_sampler],
++            candidate_count,
++            mean_distance,
++            mean_radius,
++        )
++
++    def get_benchmarks_names(self):
++        return (
++            *super().get_benchmarks_names(),
++            "replay_sampler_code",
++            "replay_candidate_count",
++            "replay_mean_distance",
++            "replay_mean_radius",
++        )
++
++    def sample(self):
++        if self.crc_debug:
++            raise RuntimeError("CRC debug is not implemented for sequence sampling")
++        if self.sample_preprocessor is not None:
++            raise RuntimeError("Sample preprocessor support is not implemented for sequences")
++
++        with torch.no_grad():
++            t0 = time.perf_counter()
++            starts = self.sample_sequence_indices()
++            batch_size = len(starts)
++            time_offsets = np.arange(self.sequence_length)
++            indices = (starts[:, np.newaxis] + time_offsets).reshape(-1)
++            idx_last = indices + self.min_samples - 1
++            idx_now = indices + self.min_samples
++            t1 = time.perf_counter()
++
++            acts = self.load_batch_acts(indices)
++            last_act_buf = acts[:, :-1]
++            new_act_buf = acts[:, 1:]
++            t2 = time.perf_counter()
++
++            imgs = self.load_batch_imgs(indices)
++            imgs_last_obs = imgs[:, :-1]
++            imgs_new_obs = imgs[:, 1:]
++            t3 = time.perf_counter()
++
++            eoes = self.load_batch_eoes(indices)
++            eoes_prev_acts = eoes[:, -self.act_buf_len - 1:-1]
++            eoes_new_acts = eoes[:, -self.act_buf_len:]
++            eoes_prev_imgs = eoes[:, -self.imgs_obs - 1:-1]
++            eoes_new_imgs = eoes[:, -self.imgs_obs:]
++            fix_batch_history_around_eoes_numpy(last_act_buf, eoes_prev_acts)
++            fix_batch_history_around_eoes_numpy(new_act_buf, eoes_new_acts)
++            fix_batch_history_around_eoes_numpy(imgs_last_obs, eoes_prev_imgs)
++            fix_batch_history_around_eoes_numpy(imgs_new_obs, eoes_new_imgs)
++            t4 = time.perf_counter()
++
++            if str(self.device).startswith("cuda"):
++                last_act_buf = last_act_buf.pin_memory()
++                new_act_buf = new_act_buf.pin_memory()
++                imgs_last_obs = imgs_last_obs.pin_memory()
++                imgs_new_obs = imgs_new_obs.pin_memory()
++            t5 = time.perf_counter()
++
++            fields = (
++                self.data[2][idx_last],
++                self.data[7][idx_last],
++                self.data[8][idx_last],
++                imgs_last_obs,
++                self.data[1][idx_now],
++                self.data[5][idx_now],
++                self.data[2][idx_now],
++                self.data[7][idx_now],
++                self.data[8][idx_now],
++                imgs_new_obs,
++                self.data[9][idx_now],
++                self.data[10][idx_now],
++            )
++            fields = tuple(
++                field.to(self.device, non_blocking=True) for field in fields
++            )
++            last_act_buf = last_act_buf.to(self.device, non_blocking=True)
++            new_act_buf = new_act_buf.to(self.device, non_blocking=True)
++            t6 = time.perf_counter()
++
++            def sequence(tensor):
++                return tensor.reshape(
++                    batch_size, self.sequence_length, *tensor.shape[1:]
++                )
++
++            (
++                speed,
++                gear,
++                rpm,
++                images,
++                action,
++                reward,
++                next_speed,
++                next_gear,
++                next_rpm,
++                next_images,
++                terminated,
++                truncated,
++            ) = (sequence(field) for field in fields)
++            last_actions = tuple(
++                sequence(last_act_buf[:, j]) for j in range(self.act_buf_len)
++            )
++            next_actions = tuple(
++                sequence(new_act_buf[:, j]) for j in range(self.act_buf_len)
++            )
++            obs = (speed, gear, rpm, images, *last_actions)
++            next_obs = (
++                next_speed,
++                next_gear,
++                next_rpm,
++                next_images,
++                *next_actions,
++            )
++            is_first = torch.zeros(
++                batch_size,
++                self.sequence_length,
++                device=self.device,
++                dtype=torch.bool,
++            )
++            is_first[:, 0] = True
++            t7 = time.perf_counter()
++
++            self.nb_iterations += 1
++            self.index_time += t1 - t0
++            self.load_acts_time += t2 - t1
++            self.load_imgs_time += t3 - t2
++            self.fix_histories_time += t4 - t3
++            self.pin_memory_time += t5 - t4
++            self.move_to_device_time += t6 - t5
++            self.assemble_time += t7 - t6
++
++            return (
++                obs,
++                action,
++                reward,
++                next_obs,
++                terminated,
++                truncated,
++                is_first,
++            )
++
++
+ # JIT torch memories ===================================================================================================
+ 
+ TORCH_DATA_TYPE_TM20_FULL = List[torch.Tensor]
+diff --git a/tmrl/custom/torch/custom_models.py b/tmrl/custom/torch/custom_models.py
+index 51d1e64..ffecbd4 100644
+--- a/tmrl/custom/torch/custom_models.py
++++ b/tmrl/custom/torch/custom_models.py
+@@ -257,6 +257,9 @@ class VanillaCNN(nn.Module):
+         else:
+             speed, gear, rpm, images, act1, act2 = x
+ 
++        if images.dtype == torch.uint8:
++            images = images.float() / 255.0
++
+         x = F.relu(self.conv1(images))
+         x = F.relu(self.conv2(x))
+         x = F.relu(self.conv3(x))
+@@ -281,9 +284,19 @@ class SquashedGaussianVanillaCNNActor(TorchActorModule):
+         self.mu_layer = nn.Linear(256, dim_act)
+         self.log_std_layer = nn.Linear(256, dim_act)
+         self.act_limit = act_limit
++        self.feature_dim = 256
++
++    def encode_observation(self, obs):
++        """Encode a real observation into the deployed policy feature space."""
++        return self.net(obs)
++
++    def forward_from_features(self, net_out, test=False, with_logprob=True):
++        """Apply the deployed action head to real or grounded imagined features."""
++        if net_out.shape[-1] != self.feature_dim:
++            raise ValueError(
++                f"Expected actor features of width {self.feature_dim}, got {net_out.shape[-1]}"
++            )
+ 
+-    def forward(self, obs, test=False, with_logprob=True):
+-        net_out = self.net(obs)
+         mu = self.mu_layer(net_out)
+         log_std = self.log_std_layer(net_out)
+         log_std = torch.clamp(log_std, LOG_STD_MIN, LOG_STD_MAX)
+@@ -312,6 +325,10 @@ class SquashedGaussianVanillaCNNActor(TorchActorModule):
+ 
+         return pi_action, logp_pi
+ 
++    def forward(self, obs, test=False, with_logprob=True):
++        net_out = self.encode_observation(obs)
++        return self.forward_from_features(net_out, test=test, with_logprob=with_logprob)
++
+     def act(self, obs, test=False):
+         with torch.no_grad():
+             a, _ = self.forward(obs, test, False)
+@@ -386,11 +403,14 @@ def remove_colors(images):
+ 
+ 
+ class SquashedGaussianVanillaColorCNNActor(SquashedGaussianVanillaCNNActor):
+-    def forward(self, obs, test=False, with_logprob=True):
++    def encode_observation(self, obs):
+         speed, gear, rpm, images, act1, act2 = obs
+         images = remove_colors(images)
+-        obs = (speed, gear, rpm, images, act1, act2)
+-        return super().forward(obs, test=False, with_logprob=True)
++        return super().encode_observation((speed, gear, rpm, images, act1, act2))
++
++    def forward(self, obs, test=False, with_logprob=True):
++        net_out = self.encode_observation(obs)
++        return self.forward_from_features(net_out, test=test, with_logprob=with_logprob)
+ 
+ 
+ class VanillaColorCNNQFunction(VanillaCNNQFunction):
+diff --git a/tutorial/README.md b/tutorial/README.md
+index 47a446a..ae8e637 100644
+--- a/tutorial/README.md
++++ b/tutorial/README.md
+@@ -1,5 +1,8 @@
+ # TMRL tutorial scripts
+ 
++For the opt-in recurrent world-model controller, see
++[Recurrent Dreamer control](../readme/dreamer_control.md).
++
+ :warning: _For simplicity, the "tuto" scripts  launch the `Server`, the `Trainer` and a `RolloutWorker` in one go.
+ In real-world applications, you often want to launch these entities in separate terminals / machines instead.
+ See for instance [this script](competition/custom_actor_module.py)._
+@@ -18,10 +21,15 @@ While TMRL primarily targets real-time environments, this scripts illustrates op
+ [tuto_minimal_pendulum_jax.py](tuto_minimal_pendulum_jax.py) is an equivalent of the previous script, using the TMRL pipeline for JAX / Flax NNX instead of torch.
+ It illustrates how to leverage TMRL JAX support to develop extremely optimized training pipelines that can run on TPUs.
+ 
++The experimental self-play and world-model scripts are described in
++[AZR, Latent Imagination, and Zero-Shot Transfer](../readme/azr_latent_imagination.md).
++Their smoke tests verify execution only; use the held-out evaluation protocol in
++that note before making a zero-shot-transfer claim.
++
+ ## Ad-hoc optimized TMRL pipelines:
+ 
+ [tuto.py](tuto.py) is the script discussed in the [long TMRL tutorial](https://github.com/trackmania-rl/tmrl/blob/master/readme/tuto_library.md). 
+ This tutorial is meant to teach you how to implement your own optimized TMRL objects, such as an Internet bandwidth-efficient and memory-efficient pipeline for observation spaces containing histories of images.
+ 
+ Note that, while this tutorial teaches you how to implement a subclass of `TorchMemory`, it is advisable to rather directly implement a subclass of `Memory` in sampling-bound applications (i.e., directly sampling minibatches to avoid collating).
+-If interested, please read `memory.py`.
+\ No newline at end of file
++If interested, please read `memory.py`.

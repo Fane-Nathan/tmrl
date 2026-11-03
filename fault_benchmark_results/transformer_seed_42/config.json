@@ -1,0 +1,18 @@
+{
+  "algorithm": "transformer_rl2",
+  "seed": 42,
+  "iterations": 100,
+  "collection_episodes_per_iter": 4,
+  "gradient_steps_per_iter": 100,
+  "utd": 10,
+  "batch_size": 64,
+  "burn_in": 8,
+  "train_seq_len": 24,
+  "lambda_task": 0.05,
+  "use_layernorm": true,
+  "val_interval": 10,
+  "val_episodes": 10,
+  "test_episodes": 25,
+  "base_eval_seed": 50000,
+  "device": "cuda"
+}

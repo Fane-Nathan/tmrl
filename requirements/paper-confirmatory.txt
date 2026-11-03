@@ -1,0 +1,7 @@
+# Minimal environment for the paper's confirmatory HalfCheetah benchmark.
+# Exact versions used by each run should also be captured in run provenance.
+numpy>=2.0,<3.0
+torch>=2.0,<3.0
+gymnasium[mujoco]>=1.0,<2.0
+matplotlib>=3.8,<4.0
+psutil>=5.9,<8.0
