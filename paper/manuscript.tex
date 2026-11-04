@@ -11,7 +11,7 @@
 \title{History-Conditioned SAC under Sensor Faults: A Pilot Study of Adaptation and Retention}
 \titlerunning{Adaptation and Retention under Sensor Faults}
 \author{Felix Surjodinoto \and Keandre Rafael \and Delroy \and Samuel Philip}
-\authorrunning{F. Surjodinoto et al.}
+\authorrunning{\mbox{}}
 \institute{Computer Science Department, School of Computer Science,\\Bina Nusantara University, Jakarta 11530, Indonesia\\
 \email{\{felix.surjodinoto,keandre.rafael,delroy,samuel.philip\}@binus.ac.id}}
 \maketitle
@@ -126,16 +126,26 @@ Twelve behavioral tests check corruption, timing, random-stream separation, repl
 \section{Conclusion}
 \input{conclusion_content.tex}
 
-\paragraph{Code and data availability.} \input{availability_content.tex}
+\enlargethispage{1.5\baselineskip}\paragraph{Code and data availability.} \input{availability_content.tex}
 
 % Springer's current LNCS template places this in a credits block; the conference-linked v2.20 class
 % has none, so the same run-in small-font layout is reproduced here.
 {\small\subsubsection*{Disclosure of Interests.} The authors have no competing interests to declare that are relevant to the content of this article.\par}
 
-\begin{samepage}
-\section*{AI Usage Declaration}
-\input{ai_declaration_content.tex}
-\par\end{samepage}
+{\small\subsubsection*{AI Usage Declaration.}
+\input{ai_declaration_content.tex}\par}
+
+{\small\subsubsection*{Author Contributions.}
+F.S.: conceptualization, sensor-fault wrappers, adaptation pipeline, experiments, data analysis, and manuscript drafting. K.R.: software verification, statistical analysis, auditing, and figures. D.: baseline reproduction, replay diagnostics, and latency benchmarking. S.P.: supervision, methodology validation, project administration, and review. All authors approved the final manuscript.\par}
 \bibliographystyle{splncs04}
+\let\oldthebibliography\thebibliography
+\let\endoldthebibliography\endthebibliography
+\renewenvironment{thebibliography}[1]{%
+  \begin{oldthebibliography}{#1}%
+    \setlength{\itemsep}{0pt plus 0.2pt}%
+    \setlength{\parskip}{0pt}%
+}{%
+  \end{oldthebibliography}%
+}
 \bibliography{references}
 \end{document}
