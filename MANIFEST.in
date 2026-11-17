@@ -1,2 +1,4 @@
+include LICENSE
 include readme/pypi.md
-exclude tmrl/wandb/*
+prune tmrl/wandb
+global-exclude __pycache__ *.py[cod]

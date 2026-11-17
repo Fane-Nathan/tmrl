@@ -19,10 +19,10 @@ The documentation describes the ``tmrl`` python API and is intended for develope
 implement their own training pipelines.
 We also provide an `advanced tutorial`_ for this purpose.
 
-.. _`advanced tutorial`: https://github.com/trackmania-rl/tmrl/blob/master/tmrl/tuto/tuto.py
+.. _`advanced tutorial`: https://github.com/trackmania-rl/tmrl/blob/master/tutorial/tuto.py
 
 The three most important classes are ``Server``, ``RolloutWorker`` and ``Trainer``.
-All these classes are defined in the ``tmrl.networking`` module.
+All these classes are defined in the ``tmrl.core.networking`` module.
 
 
 

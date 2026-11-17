@@ -1,4 +1,5 @@
 from abc import ABC, abstractmethod
+from pathlib import Path
 import pickle
 
 
@@ -10,9 +11,9 @@ class ActorModule(ABC):
     Implement this interface for the RolloutWorker(s) to interact with your policy.
 
     .. note::
-       If overidden, the __init()__ definition must at least take the two following arguments (args or kwargs):
-       `observation_space` and `action_space`.
-       When overriding `__init__`, don't forget to call `super().__init__` in the subclass.
+       If overridden, the ``__init__()`` definition must at least take the two following arguments (args or kwargs):
+       ``observation_space`` and ``action_space``.
+       When overriding ``__init__``, don't forget to call ``super().__init__`` in the subclass.
     """
     def __init__(self, observation_space, action_space):
         """
@@ -39,6 +40,8 @@ class ActorModule(ABC):
         Args:
             path (pathlib.Path): a filepath to save your `ActorModule` to
         """
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
         with open(path, 'wb') as f:
             pickle.dump(obj=self, file=f)
 
@@ -97,4 +100,14 @@ class ActorModule(ABC):
         raise NotImplementedError
 
     def act_(self, obs, test=False):
+        """
+        Delegates observation handling to :meth:`act`.
+
+        Args:
+            obs (object): the observation
+            test (bool): True at test time, False otherwise
+
+        Returns:
+            numpy.array: the computed action
+        """
         return self.act(obs, test=test)

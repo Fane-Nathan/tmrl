@@ -15,6 +15,7 @@ Features:
 
 from __future__ import annotations
 
+import logging
 import math
 import os
 from collections import deque
@@ -662,7 +663,7 @@ class MultiModalCarBrain(nn.Module):
         )
 
         if os.path.exists(foundation_weights_path):
-            print(f"[+] Loading 1,000,000 foundation weights into MultiModalCarBrain backbone from: {foundation_weights_path}")
+            logging.info("Loading 1,000,000 foundation weights into MultiModalCarBrain backbone from: %s", foundation_weights_path)
             base_dict = torch.load(foundation_weights_path, map_location="cpu")
             model_dict = model.state_dict()
 
@@ -674,9 +675,9 @@ class MultiModalCarBrain(nn.Module):
                     transferred += 1
 
             model.load_state_dict(model_dict)
-            print(f"[+] Successfully transferred {transferred} foundation weight tensors into Transformer backbone!")
+            logging.info("Successfully transferred %d foundation weight tensors into Transformer backbone!", transferred)
         else:
-            print(f"[-] Foundation weights '{foundation_weights_path}' not found, initializing fresh.")
+            logging.warning("Foundation weights '%s' not found, initializing fresh.", foundation_weights_path)
 
         model.to(device)
         return model

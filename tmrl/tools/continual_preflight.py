@@ -1,7 +1,9 @@
 """Standalone environment preflight for the continual JAX trainer.
 
-Run this file directly so the check does not import ``tmrl.__init__`` and does
-not require a TrackMania ``TmrlData`` directory inside WSL2.
+This module intentionally has no ``tmrl`` imports so it can run directly by
+file path before ``tmrl`` is installed (for example during
+``scripts/bootstrap_continual_jax_wsl2.sh``) as well as via
+``python -m tmrl.tools.continual_preflight``, without ``TmrlData`` or TrackMania.
 """
 
 from __future__ import annotations
@@ -57,6 +59,7 @@ def _run_command(command: list[str], cwd: Path | None = None) -> dict[str, Any]:
 
 
 def _git_state(repo_root: Path) -> dict[str, Any]:
+    # Force autocrlf=true so Windows CRLF checkouts on NTFS mounts do not report false dirty status in WSL2.
     git = ["git", "-c", "core.autocrlf=true"]
     commit = _run_command([*git, "rev-parse", "HEAD"], cwd=repo_root)
     status = _run_command([*git, "status", "--short"], cwd=repo_root)
@@ -75,11 +78,23 @@ def _is_wsl2() -> bool:
     return "microsoft" in version and "wsl2" in version
 
 
+def _require_jax_stack() -> tuple[Any, Any, Any, Any]:
+    try:
+        import jax
+        import jax.numpy as jnp
+        import optax
+        from flax import nnx
+    except ImportError as exc:
+        raise RuntimeError(
+            f"Continual JAX preflight requires JAX/Flax/Optax (missing: {exc.name}). "
+            'Install them with `pip install "tmrl[jax]"` or run '
+            "`bash scripts/bootstrap_continual_jax_wsl2.sh` on WSL2/Linux."
+        ) from exc
+    return jax, jnp, optax, nnx
+
+
 def _tiny_nnx_train_step() -> dict[str, Any]:
-    import jax
-    import jax.numpy as jnp
-    import optax
-    from flax import nnx
+    jax, jnp, optax, nnx = _require_jax_stack()
 
     class TinyRegressor(nnx.Module):
         def __init__(self, rngs: nnx.Rngs):
@@ -122,7 +137,8 @@ def _tiny_nnx_train_step() -> dict[str, Any]:
 
 
 def collect_preflight(repo_root: Path | None = None) -> dict[str, Any]:
-    import jax
+    """Collect JAX/Flax/Optax, GPU, NNX step, and git state preflight info."""
+    jax, _, _, _ = _require_jax_stack()
 
     repo_root = repo_root or Path(__file__).resolve().parents[2]
     devices = [
@@ -200,20 +216,19 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         payload = collect_preflight()
+        failures = []
+        if not payload["nnx_train_step"]["ok"]:
+            failures.append("NNX optimizer step did not reduce the tiny regression loss")
+        if args.require_gpu and not payload["jax"]["gpu_available"]:
+            failures.append("JAX did not report a GPU device")
+        payload["passed"] = not failures
+        payload["failures"] = failures
+
+        if args.output is not None:
+            _atomic_write_json(args.output.resolve(), payload)
     except Exception as exc:
         print(f"Preflight failed: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 2
-
-    failures = []
-    if not payload["nnx_train_step"]["ok"]:
-        failures.append("NNX optimizer step did not reduce the tiny regression loss")
-    if args.require_gpu and not payload["jax"]["gpu_available"]:
-        failures.append("JAX did not report a GPU device")
-    payload["passed"] = not failures
-    payload["failures"] = failures
-
-    if args.output is not None:
-        _atomic_write_json(args.output.resolve(), payload)
 
     print(json.dumps(payload, indent=2, sort_keys=True))
     return 0 if payload["passed"] else 2

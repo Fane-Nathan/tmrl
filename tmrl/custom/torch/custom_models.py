@@ -225,12 +225,24 @@ def conv2d_out_dims(conv_layer, h_in, w_in):
     return h_out, w_out
 
 
+def _infer_image_dims(observation_space, img_hist_len=None, img_height=None, img_width=None):
+    hist = int(img_hist_len if img_hist_len is not None else getattr(cfg, "IMG_HIST_LEN", 4))
+    h = int(img_height if img_height is not None else getattr(cfg, "IMG_HEIGHT", 64))
+    w = int(img_width if img_width is not None else getattr(cfg, "IMG_WIDTH", 64))
+    if observation_space is not None and hasattr(observation_space, "__getitem__") and len(observation_space) > 3:
+        img_shape = getattr(observation_space[3], "shape", None)
+        if img_shape is not None and len(img_shape) in (3, 4):
+            hist = int(img_shape[0])
+            h = int(img_shape[1])
+            w = int(img_shape[2])
+    return hist, h, w
+
+
 class VanillaCNN(nn.Module):
-    def __init__(self, q_net, dropout=0.0, layer_norm=False):
+    def __init__(self, q_net, dropout=0.0, layer_norm=False, img_hist_len=None, img_height=None, img_width=None):
         super(VanillaCNN, self).__init__()
         self.q_net = q_net
-        self.h_out, self.w_out = cfg.IMG_HEIGHT, cfg.IMG_WIDTH
-        hist = cfg.IMG_HIST_LEN
+        hist, self.h_out, self.w_out = _infer_image_dims(None, img_hist_len=img_hist_len, img_height=img_height, img_width=img_width)
 
         self.conv1 = nn.Conv2d(hist, 64, 8, stride=2)
         self.h_out, self.w_out = conv2d_out_dims(self.conv1, self.h_out, self.w_out)
@@ -280,7 +292,8 @@ class SquashedGaussianVanillaCNNActor(TorchActorModule):
         super().__init__(observation_space, action_space)
         dim_act = action_space.shape[0]
         act_limit = action_space.high[0]
-        self.net = VanillaCNN(q_net=False, layer_norm=layer_norm)
+        hist, h, w = _infer_image_dims(observation_space)
+        self.net = VanillaCNN(q_net=False, layer_norm=layer_norm, img_hist_len=hist, img_height=h, img_width=w)
         self.mu_layer = nn.Linear(256, dim_act)
         self.log_std_layer = nn.Linear(256, dim_act)
         self.act_limit = act_limit
@@ -338,7 +351,8 @@ class SquashedGaussianVanillaCNNActor(TorchActorModule):
 class VanillaCNNQFunction(nn.Module):
     def __init__(self, observation_space, action_space, dropout=0.0, layer_norm=False):
         super().__init__()
-        self.net = VanillaCNN(q_net=True, dropout=dropout, layer_norm=layer_norm)
+        hist, h, w = _infer_image_dims(observation_space)
+        self.net = VanillaCNN(q_net=True, dropout=dropout, layer_norm=layer_norm, img_hist_len=hist, img_height=h, img_width=w)
 
     def forward(self, obs, act):
         x = (*obs, act)

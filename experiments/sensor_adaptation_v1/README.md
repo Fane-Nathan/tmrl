@@ -70,7 +70,7 @@ python analyze_replay_bias.py <ROOT> --protocol protocol_extension.json
 python benchmark_latency.py --trajectories <PILOT_ROOT> --out latency.json
 ```
 
-`analyze_extension.py` refuses to analyse unless every shard is COMPLETE and the root contains exactly the protocol's seeds, conditions and controllers. `scripts/build_camera_ready_assets.py` turns the saved analysis files into the paper's figures, tables and `\R{...}` number macros. `scripts/run_camera_ready_pipeline.py` is the unattended scheduler used for the camera-ready runs. It gates launches on the Windows commit charge, adopts running jobs, retries a failed job once and moves failed outputs to `failed_attempts/`.
+`analyze_extension.py` refuses to analyse unless every shard is COMPLETE and the root contains exactly the protocol's seeds, conditions and controllers. `build_paper_assets.py` turns the saved analysis files into the paper's figures and tables.
 
 ### Statistics
 

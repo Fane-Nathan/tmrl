@@ -22,9 +22,24 @@ if platform.system() == "Windows":
     except Exception:
         pass
 
-    import win32gui
-    import win32ui
-    import win32con
+    try:
+        import win32gui
+        import win32ui
+        import win32con
+    except ImportError:
+        win32gui = None
+        win32ui = None
+        win32con = None
+
+    def _require_win32():
+        global win32gui, win32ui, win32con
+        if win32gui is None or win32ui is None or win32con is None:
+            import win32gui as _win32gui
+            import win32ui as _win32ui
+            import win32con as _win32con
+            win32gui = _win32gui
+            win32ui = _win32ui
+            win32con = _win32con
 
     _DXCAM_CAMERA = None
     _DXCAM_REGION = None
@@ -307,7 +322,11 @@ if platform.system() == "Windows":
                 return self._screenshot_dxcam(hwnd)
             return self._screenshot_gdi(hwnd)
 
-        def move_and_resize(self, x=1, y=0, w=cfg.WINDOW_WIDTH, h=cfg.WINDOW_HEIGHT):
+        def move_and_resize(self, x=1, y=0, w=None, h=None):
+            if w is None:
+                w = cfg.WINDOW_WIDTH
+            if h is None:
+                h = cfg.WINDOW_HEIGHT
             if self.capture_backend == "dxcam" and _DXCAM_REGION is not None:
                 if (x, y, w, h) != (1, 0, cfg.WINDOW_WIDTH, cfg.WINDOW_HEIGHT):
                     raise RuntimeError("Restart DXcam before changing its capture geometry")
@@ -335,7 +354,10 @@ elif platform.system() == "Linux":
 
     import subprocess
     import time
-    import mss
+    try:
+        import mss
+    except ImportError:
+        mss = None
 
 
     def get_window_id(name):
@@ -445,7 +467,11 @@ elif platform.system() == "Linux":
                 logging.error(f"failed to capture screenshot")
                 raise e
 
-        def move_and_resize(self, x=0, y=0, w=cfg.WINDOW_WIDTH, h=cfg.WINDOW_HEIGHT):
+        def move_and_resize(self, x=0, y=0, w=None, h=None):
+            if w is None:
+                w = cfg.WINDOW_WIDTH
+            if h is None:
+                h = cfg.WINDOW_HEIGHT
             logging.debug(f"prepare {self.window_name} to {w}x{h} @ {x}, {y}")
 
             try:

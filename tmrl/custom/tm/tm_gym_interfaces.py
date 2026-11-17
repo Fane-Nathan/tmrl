@@ -236,21 +236,7 @@ class TM2020Interface(RealTimeGymInterface):
             self.trajectory_assist.reset()
         self.send_control(self.get_default_action())
         self.episodes_on_current_map += 1
-
-        if self.auto_map_cycle and self.episodes_on_current_map >= self.episodes_per_map:
-            logging.info(
-                f"[AutoMapCycler] Reached {self.episodes_on_current_map} episodes on current track. "
-                f"Automatically cycling to next track..."
-            )
-            try:
-                from scripts.cycle_map_macro import cycle_now
-                cycle_now(strategy="active_file", gamepad=self.j if self.gamepad else None)
-            except Exception as e:
-                logging.error(f"[AutoMapCycler] Exception cycling map: {e}")
-                self.reset_race()
-            self.episodes_on_current_map = 0
-        else:
-            self.reset_race()
+        self.reset_race()
 
         time_sleep = max(0, cfg.SLEEP_TIME_AT_RESET - 0.1) if self.gamepad else cfg.SLEEP_TIME_AT_RESET
         time.sleep(time_sleep)  # must be long enough for image to be refreshed

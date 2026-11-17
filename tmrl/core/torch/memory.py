@@ -1,7 +1,11 @@
 from abc import ABC
+from typing import Callable
 
 from tmrl.core.memory import Memory
 from tmrl.core.torch.util import collate_torch
+
+
+__docformat__ = "google"
 
 
 class TorchMemory(Memory, ABC):
@@ -14,7 +18,7 @@ class TorchMemory(Memory, ABC):
     """
     def __init__(self,
                  device,
-                 sample_preprocessor: callable = None,
+                 sample_preprocessor: Callable = None,
                  memory_size=1000000,
                  batch_size=256,
                  dataset_path="",

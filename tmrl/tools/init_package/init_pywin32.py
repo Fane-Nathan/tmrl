@@ -6,26 +6,28 @@
 #
 # copies PyWinTypesxx.dll and PythonCOMxx.dll into the system directory,
 # and creates a pth file
+import contextlib
 import os
+import platform
 import sys
 import glob
 import shutil
 import sysconfig
-
-try:
-    import winreg as winreg
-except:
-    import winreg
-
-# Send output somewhere so it can be found if necessary...
 import tempfile
 
-tee_f = open(os.path.join(tempfile.gettempdir(), "pywin32_postinstall.log"), "w")
+
+def _get_winreg():
+    if platform.system() != "Windows":
+        raise RuntimeError("pywin32 postinstall is only supported on Windows.")
+    import winreg
+
+    return winreg
 
 
 class Tee:
-    def __init__(self, file):
+    def __init__(self, file, log_file):
         self.f = file
+        self.log_file = log_file
 
     def write(self, what):
         if self.f is not None:
@@ -33,7 +35,7 @@ class Tee:
                 self.f.write(what.replace("\n", "\r\n"))
             except IOError:
                 pass
-        tee_f.write(what)
+        self.log_file.write(what)
 
     def flush(self):
         if self.f is not None:
@@ -41,18 +43,28 @@ class Tee:
                 self.f.flush()
             except IOError:
                 pass
-        tee_f.flush()
+        self.log_file.flush()
 
 
-# For some unknown reason, when running under bdist_wininst we will start up
-# with sys.stdout as None but stderr is hooked up. This work-around allows
-# bdist_wininst to see the output we write and display it at the end of
-# the install.
-if sys.stdout is None:
-    sys.stdout = sys.stderr
+@contextlib.contextmanager
+def _tee_output():
+    if isinstance(sys.stdout, Tee) or isinstance(sys.stderr, Tee):
+        yield
+        return
 
-sys.stderr = Tee(sys.stderr)
-sys.stdout = Tee(sys.stdout)
+    log_path = os.path.join(tempfile.gettempdir(), "pywin32_postinstall.log")
+    orig_stdout = sys.stdout
+    orig_stderr = sys.stderr
+    with open(log_path, "w", encoding="utf-8") as log_file:
+        stdout_target = orig_stderr if orig_stdout is None else orig_stdout
+        sys.stderr = Tee(orig_stderr, log_file)
+        sys.stdout = Tee(stdout_target, log_file)
+        try:
+            yield
+        finally:
+            sys.stdout = orig_stdout
+            sys.stderr = orig_stderr
+
 
 com_modules = [
     # module_name,                      class_names
@@ -68,7 +80,8 @@ silent = 0
 # Verbosity of output messages.
 verbose = 1
 
-root_key_name = "Software\\Python\\PythonCore\\" + sys.winver
+_winver = getattr(sys, "winver", f"{sys.version_info[0]}.{sys.version_info[1]}")
+root_key_name = "Software\\Python\\PythonCore\\" + _winver
 
 try:
     # When this script is run from inside the bdist_wininst installer,
@@ -88,6 +101,7 @@ except NameError:
         pass
 
     def get_root_hkey():
+        winreg = _get_winreg()
         try:
             winreg.OpenKey(
                 winreg.HKEY_LOCAL_MACHINE, root_key_name, 0, winreg.KEY_CREATE_SUB_KEY
@@ -198,6 +212,7 @@ def LoadSystemModule(lib_dir, modname):
 
 
 def SetPyKeyVal(key_name, value_name, value):
+    winreg = _get_winreg()
     root_hkey = get_root_hkey()
     root_key = winreg.OpenKey(root_hkey, root_key_name)
     try:
@@ -213,6 +228,7 @@ def SetPyKeyVal(key_name, value_name, value):
 
 
 def UnsetPyKeyVal(key_name, value_name, delete_key=False):
+    winreg = _get_winreg()
     root_hkey = get_root_hkey()
     root_key = winreg.OpenKey(root_hkey, root_key_name)
     try:
@@ -280,6 +296,7 @@ def RegisterPythonwin(register=True, lib_dir=None):
     """
     import os
 
+    winreg = _get_winreg()
     if lib_dir is None:
         lib_dir = sysconfig.get_paths()["platlib"]
     classes_root = get_root_hkey()
@@ -337,6 +354,7 @@ def RegisterPythonwin(register=True, lib_dir=None):
 
 
 def get_shortcuts_folder():
+    winreg = _get_winreg()
     if get_root_hkey() == winreg.HKEY_LOCAL_MACHINE:
         try:
             fldr = get_special_folder_path("CSIDL_COMMON_PROGRAMS")
@@ -405,7 +423,16 @@ def fixup_dbi():
 
 
 def install(lib_dir):
+    if platform.system() != "Windows":
+        raise RuntimeError("pywin32 postinstall is only supported on Windows.")
+    with _tee_output():
+        _install_impl(lib_dir)
+
+
+def _install_impl(lib_dir):
     import traceback
+
+    winreg = _get_winreg()
 
     # The .pth file is now installed as a regular file.
     # Create the .pth file in the site-packages dir, and use only relative paths
@@ -420,7 +447,7 @@ def install(lib_dir):
     # pywintypes and pythoncom registered.  We no longer need this, and stale
     # entries hurt us.
     for name in "pythoncom pywintypes".split():
-        keyname = "Software\\Python\\PythonCore\\" + sys.winver + "\\Modules\\" + name
+        keyname = "Software\\Python\\PythonCore\\" + _winver + "\\Modules\\" + name
         for root in winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER:
             try:
                 winreg.DeleteKey(root, keyname + "\\Debug")
@@ -585,6 +612,13 @@ def install(lib_dir):
 
 
 def uninstall(lib_dir):
+    if platform.system() != "Windows":
+        raise RuntimeError("pywin32 postinstall is only supported on Windows.")
+    with _tee_output():
+        _uninstall_impl(lib_dir)
+
+
+def _uninstall_impl(lib_dir):
     # First ensure our system modules are loaded from pywin32_system, so
     # we can remove the ones we copied...
     LoadSystemModule(lib_dir, "pywintypes")
@@ -683,6 +717,8 @@ def uninstall(lib_dir):
 
 
 def verify_destination(location):
+    import argparse
+
     if not os.path.isdir(location):
         raise argparse.ArgumentTypeError('Path "{}" does not exist!'.format(location))
     return location
@@ -694,12 +730,15 @@ def fix_pywin32():
 
     Note: this only needs to be done if pywin32 members fail to import.
     """
+    if platform.system() != "Windows":
+        raise RuntimeError("fix_pywin32() is only supported on Windows.")
     destination = sysconfig.get_paths()["platlib"]
     install(destination)
 
 
 def main():
     import argparse
+    global silent, verbose
 
     parser = argparse.ArgumentParser(
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -768,12 +807,13 @@ def main():
     silent = args.silent
     verbose = not args.quiet
 
-    if args.install:
-        install(args.destination)
+    with _tee_output():
+        if args.install:
+            install(args.destination)
 
-    if args.remove:
-        if not is_bdist_wininst:
-            uninstall(args.destination)
+        if args.remove:
+            if not is_bdist_wininst:
+                uninstall(args.destination)
 
 
 if __name__ == "__main__":

@@ -5,6 +5,7 @@ into Yann Bouteiller's official TMRL reinforcement learning pipeline (SAC/REDQ).
 """
 
 from collections import deque
+import logging
 import math
 from pathlib import Path
 from typing import Optional, Tuple
@@ -49,17 +50,17 @@ class SquashedGaussianFoundationActor(TorchActorModule):
         base_file = Path(base_foundation_path)
 
         if model_file.exists():
-            print(f"[+] FoundationActor: Loading pre-trained MultiModalCarBrain from {model_file}")
+            logging.info("FoundationActor: Loading pre-trained MultiModalCarBrain from %s", model_file)
             self.brain = MultiModalCarBrain(d_model=256, n_layers=6, n_heads=8)
             try:
                 self.brain.load_state_dict(torch.load(str(model_file), map_location=device, weights_only=True))
             except Exception:
                 self.brain.load_state_dict(torch.load(str(model_file), map_location=device, weights_only=False))
         elif base_file.exists():
-            print(f"[+] FoundationActor: Initializing from 1M foundation physics weights: {base_file}")
+            logging.info("FoundationActor: Initializing from 1M foundation physics weights: %s", base_file)
             self.brain = MultiModalCarBrain.from_foundation(str(base_file), device=device)
         else:
-            print("[-] FoundationActor: No pre-trained weights found! Initializing fresh MultiModalCarBrain.")
+            logging.warning("FoundationActor: No pre-trained weights found! Initializing fresh MultiModalCarBrain.")
             self.brain = MultiModalCarBrain(d_model=256, n_layers=6, n_heads=8)
 
         self.brain.to(device)
@@ -103,7 +104,7 @@ class SquashedGaussianFoundationActor(TorchActorModule):
                     except Exception:
                         self.brain.load_state_dict(torch.load(str(model_file), map_location=self.device, weights_only=False))
                     self._last_mtime = mtime
-                    print(f"[+] FoundationActor: Hot-reloaded updated checkpoint from {model_file.name}")
+                    logging.info("FoundationActor: Hot-reloaded updated checkpoint from %s", model_file.name)
             except Exception:
                 pass
 

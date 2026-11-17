@@ -88,7 +88,7 @@ def main():
             model = load_agent(algorithm, checkpoint, context=32)
             if parameters is None:
                 deploy = [p for n, p in model.named_parameters()
-                          if not n.startswith(("critics", "target_", "task_encoder.classifier"))]
+                          if not n.startswith(("critics", "target_", "task_encoder.cls_head", "task_encoder.classifier"))]
                 parameters = {"total": sum(p.numel() for p in model.parameters()),
                               "inference_path_upper_bound": sum(p.numel() for p in deploy)}
             ms = measure(model, algorithm, tokens, device, args.steps, args.warmup, episode_length)

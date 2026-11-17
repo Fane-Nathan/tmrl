@@ -142,6 +142,7 @@ dmypy.json
 *.blg
 *.out
 wandb/
+MUJOCO_LOG.TXT
 
 data/
 demo_data/
@@ -155,6 +156,11 @@ scratch/
 test_output_brain/
 AI_Current_Track
 complete paper.pdf
+193 - *.pdf
+ICoDiT 2026*
+*.pptx
+~$*
+review paper dan yang wajib dijelaskan.txt
 
 output/adaptation_benchmark/
 output/test_sac_eval/
@@ -162,4 +168,4 @@ output/trackmania_transfer_v1/
 output/dreamer_training/
 output/sensor_adaptation/
 
-
+

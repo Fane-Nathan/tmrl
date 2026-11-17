@@ -1,6 +1,6 @@
 [
   {
-    "source": "D:\\Project\\tmrl\\scripts\\train_transformer_fault_adaptation.py",
+    "source": "scripts/train_transformer_source_recipe_v1.py",
     "source_sha256": "81ca09fe0f6207b191780cddb18a81df54c220111999712650cde53e8c446c16",
     "classes": [
       "TimestepEmbedder",
@@ -14,7 +14,7 @@
     ]
   },
   {
-    "source": "D:\\Project\\tmrl\\scripts\\train_reactive_robust_baseline.py",
+    "source": "scripts/train_reactive_source_recipe_v1.py",
     "source_sha256": "c3a945fceb3b79a5871b67709a2d10e4456627b8a8dc1241fbb9e22b7636f5d9",
     "classes": [
       "MLPGaussianActor",

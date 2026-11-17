@@ -67,7 +67,7 @@ Dataset SHA-256: `a6cf8546f2eea829b5203bc64a7bc5c9fa528c677ae41872a2444d314f655b
 
 The companion notebook `test_output_brain/driving_recovery_quality_20260911.ipynb` executed
 top-to-bottom and reconstructed both episodes from the source logs, checking labels, frame history,
-hashes and split isolation. This follows the data-quality skill's inspectable-evidence workflow.
+hashes and split isolation. This follows an inspectable-evidence workflow.
 
 Limitations: one known map, one user-declared camera, two teacher-generated runs, no recovery
 demonstrations, and no independently captured live map UID. Diagnostic GPS/current-control fields
@@ -75,10 +75,10 @@ must remain masked from visual-policy training. These are not independent human 
 
 ## Run the working known-track baseline
 
-Use the same first-person camera, with `tmrl-train` open. From `D:\Project\tmrl`:
+Use the same first-person camera, with `tmrl-train` open. From `<repo-root>`:
 
 ```powershell
-& D:\miniconda3\envs\rcdream\python.exe scripts/evaluate_live_driving.py --mode tracking --steps 5000 --max-deviation 4.5 --record-frames --camera-label first-person
+python scripts/evaluate_live_driving.py --mode tracking --steps 5000 --max-deviation 4.5 --record-frames --camera-label first-person
 ```
 
 Do not enable the old asynchronous assist hook. The explicit evaluator logs the actual chosen
@@ -131,7 +131,7 @@ three-second launch grace period, not distance from an unrelated reference.
 For another bounded policy-only probe on a user-loaded map:
 
 ```powershell
-& D:\miniconda3\envs\rcdream\python.exe scripts/evaluate_live_driving.py --mode foundation --unseen-map --steps 400 --continuous-actions --record-frames --camera-label first-person
+python scripts/evaluate_live_driving.py --mode foundation --unseen-map --steps 400 --continuous-actions --record-frames --camera-label first-person
 ```
 
 Do not use `--mode tracking` with the old trajectory on this new map. A new demonstration is
@@ -228,17 +228,11 @@ score used a different dataset/protocol and is not comparable to this new held-o
 - Deployment-path audit: `test_output_brain/visual_policy_1k_20260911_v2/deployment_audit.json`.
 - V2 SHA-256: `74f7797a0b13560afa44c9f8d3bd3636c4cf17cda576a1a072ae07fd052e43a8`.
 
-Reproduce into a fresh output directory (the trainer refuses accidental overwrite):
-
-```powershell
-& D:\miniconda3\envs\rcdream\python.exe -u scripts/train_multitrack_vision_curriculum.py --demo_file data/verified_tracking_demos_20260911.pt --existing_multimodal weights/car_brain_1m_curriculum/car_brain_multimodal.pt --output_path test_output_brain/visual_policy_1k_repeat/candidate.pt --steps 1000 --batch_size 8 --seq_len 16 --lr_vision 1e-4 --lr_backbone 1e-6 --trigger_loss_weight 0.1 --eval_every 250 --save_every 250 --eval_batch_size 8 --seed 42 --device cuda
-```
-
 After loading `tmrl-train` with the matching first-person camera, a **bounded diagnostic** run
 can test V2 without promoting it or enabling trajectory assistance:
 
 ```powershell
-& D:\miniconda3\envs\rcdream\python.exe -u scripts/evaluate_live_driving.py --mode foundation --foundation-weights test_output_brain/visual_policy_1k_20260911_v2/candidate.best.pt --continuous-actions --steps 5000 --max-deviation 4.5 --record-frames --camera-label first-person
+python -u scripts/evaluate_live_driving.py --mode foundation --foundation-weights test_output_brain/visual_policy_1k_20260911_v2/candidate.best.pt --continuous-actions --steps 5000 --max-deviation 4.5 --record-frames --camera-label first-person
 ```
 
 ### Remaining blockers and limits
@@ -255,8 +249,8 @@ can test V2 without promoting it or enabling trajectory assistance:
 - Neither candidate has been promoted. The original deployed checkpoint and saved config hashes
   remain `3af96c...263f03` and `37ec02...48cab`, respectively. No training/rollout worker is left running.
 
-The data-validation skill guided the separate metrics/denominators, saturation check, independent
-metric recomputation, and the decision to withhold promotion despite offline improvement.
+Separate metrics/denominators, saturation checks, and independent
+metric recomputation guided the decision to withhold promotion despite offline improvement.
 
 ## Different-map candidate probe and capture repair - 12 September 2026
 
@@ -286,7 +280,7 @@ old conversion given the same source frame. The recorded-frame microbenchmark ch
 The follow-up no-control preflight observed 60 distinct images out of 60 samples, with end-to-end
 p95 12.82 ms. This stationary preflight may exercise the launch safeguard rather than the full
 rolling transformer; the actual driving timings below are the relevant full-loop measurement.
-The game pause menu was resumed using the computer-use skill before this preflight and retry.
+The game pause menu was resumed before this preflight and retry.
 
 Preflight evidence is in `test_output_brain/visual_policy_1k_20260911_v2/`:
 `capture_preflight_20260912_v1.json/.png` and `capture_preflight_20260912_v2.json/.png`.
@@ -328,7 +322,7 @@ conditions and must not be presented as a controlled policy comparison.
 Reproduce a bounded diagnostic on the currently loaded different map:
 
 ```powershell
-& D:\miniconda3\envs\rcdream\python.exe -u scripts/evaluate_live_driving.py --mode foundation --unseen-map --preserve-window-size --foundation-weights test_output_brain/visual_policy_1k_20260911_v2/candidate.best.pt --continuous-actions --steps 600 --record-frames --camera-label first-person
+python -u scripts/evaluate_live_driving.py --mode foundation --unseen-map --preserve-window-size --foundation-weights test_output_brain/visual_policy_1k_20260911_v2/candidate.best.pt --continuous-actions --steps 600 --record-frames --camera-label first-person
 ```
 
 Final software checks: **50 regression tests pass**, including pixel parity and the new camera/

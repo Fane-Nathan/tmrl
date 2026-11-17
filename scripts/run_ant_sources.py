@@ -7,35 +7,25 @@ experiments are not pushed into allocation failures.
   python scripts/run_ant_sources.py --seeds 42 43 44 45 46 47 48 49
 """
 import argparse
-import ctypes
 import os
 import subprocess
 import sys
 import time
 from pathlib import Path
 
+import psutil
+
 ROOT = Path(__file__).resolve().parents[1]
 RECIPES = {"transformer": "scripts/train_transformer_source_recipe_v1.py",
            "reactive": "scripts/train_reactive_source_recipe_v1.py"}
 
 
-class MemoryStatus(ctypes.Structure):
-    _fields_ = [("dwLength", ctypes.c_ulong), ("dwMemoryLoad", ctypes.c_ulong),
-                ("ullTotalPhys", ctypes.c_ulonglong), ("ullAvailPhys", ctypes.c_ulonglong),
-                ("ullTotalPageFile", ctypes.c_ulonglong), ("ullAvailPageFile", ctypes.c_ulonglong),
-                ("ullTotalVirtual", ctypes.c_ulonglong), ("ullAvailVirtual", ctypes.c_ulonglong),
-                ("ullAvailExtendedVirtual", ctypes.c_ulonglong)]
-
-
-def free_gb():
-    status = MemoryStatus()
-    status.dwLength = ctypes.sizeof(MemoryStatus)
-    ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status))
-    return status.ullAvailPhys / 2**30
+def free_gb() -> float:
+    return float(psutil.virtual_memory().available) / (2**30)
 
 
 def main():
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--seeds", type=int, nargs="+", default=[])
     parser.add_argument("--output-dir", default="fault_benchmark_results_ant")
     parser.add_argument("--max-parallel", type=int, default=8)

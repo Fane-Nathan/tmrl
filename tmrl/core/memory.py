@@ -1,18 +1,51 @@
 # standard library imports
-import os
-import pickle
-import zlib
 from abc import ABC, abstractmethod
+from collections.abc import Mapping, Sequence
+import logging
 from pathlib import Path
+import pickle
 from random import randint
 import time
-import logging
+from typing import Callable
+import zlib
 
 # third-party imports
 import numpy as np
 
 
 __docformat__ = "google"
+
+
+def _assert_close(original, rebuilt, epsilon, label, debug_ts, debug_ts_res):
+    if isinstance(original, np.ndarray):
+        assert isinstance(rebuilt, np.ndarray) and np.allclose(original, rebuilt, atol=epsilon), (
+            f"{label} don't match:\noriginal:\n{original}\n!= rebuilt:\n{rebuilt}\n"
+            f"Time step: {debug_ts}, since reset: {debug_ts_res}"
+        )
+    elif isinstance(original, Sequence) and not isinstance(original, (str, bytes, bytearray)):
+        assert isinstance(rebuilt, Sequence) and not isinstance(rebuilt, (str, bytes, bytearray)) and len(original) == len(rebuilt), (
+            f"{label} don't match:\noriginal:\n{original}\n!= rebuilt:\n{rebuilt}\n"
+            f"Time step: {debug_ts}, since reset: {debug_ts_res}"
+        )
+        for orig_item, rebuilt_item in zip(original, rebuilt):
+            _assert_close(orig_item, rebuilt_item, epsilon, label, debug_ts, debug_ts_res)
+    elif isinstance(original, Mapping):
+        assert isinstance(rebuilt, Mapping) and original.keys() == rebuilt.keys(), (
+            f"{label} don't match:\noriginal:\n{original}\n!= rebuilt:\n{rebuilt}\n"
+            f"Time step: {debug_ts}, since reset: {debug_ts_res}"
+        )
+        for key in original:
+            _assert_close(original[key], rebuilt[key], epsilon, label, debug_ts, debug_ts_res)
+    elif isinstance(original, (int, float, np.number)) and not isinstance(original, bool):
+        assert np.allclose(original, rebuilt, atol=epsilon), (
+            f"{label} don't match:\noriginal:\n{original}\n!= rebuilt:\n{rebuilt}\n"
+            f"Time step: {debug_ts}, since reset: {debug_ts_res}"
+        )
+    else:
+        assert str(original) == str(rebuilt), (
+            f"{label} don't match:\noriginal:\n{original}\n!= rebuilt:\n{rebuilt}\n"
+            f"Time step: {debug_ts}, since reset: {debug_ts_res}"
+        )
 
 
 def check_samples_crc(original_po, original_a, original_o, original_r, original_d, original_t, rebuilt_po, rebuilt_a, rebuilt_o, rebuilt_r, rebuilt_d, rebuilt_t, debug_ts, debug_ts_res, epsilon=0.0):
@@ -25,22 +58,22 @@ def check_samples_crc(original_po, original_a, original_o, original_r, original_
         assert str(original_t) == str(rebuilt_t), f"truncated don't match:\noriginal:\n{str(original_t)}\n!= rebuilt:\n{str(rebuilt_t)}\nTime step: {debug_ts}, since reset: {debug_ts_res}"
         original_crc = zlib.crc32(str.encode(str((original_a, original_o, original_r, original_d, original_t))))
         crc = zlib.crc32(str.encode(str((rebuilt_a, rebuilt_o, rebuilt_r, rebuilt_d, rebuilt_t))))
-        assert crc == original_crc, f"CRC failed: new crc:{crc} != old crc:{original_crc}.\nEither the custom pipeline is corrupted, or crc_debug is False in the rollout worker.\noriginal sample:\n{(original_a, original_o, original_r, original_d)}\n!= rebuilt sample:\n{(rebuilt_a, rebuilt_o, rebuilt_r, rebuilt_d)}\nTime step: {debug_ts}, since reset: {debug_ts_res}"
+        assert crc == original_crc, (
+            f"CRC failed: new crc:{crc} != old crc:{original_crc}.\n"
+            f"Either the custom pipeline is corrupted, or crc_debug is False in the rollout worker.\n"
+            f"original sample:\n{(original_a, original_o, original_r, original_d, original_t)}\n"
+            f"!= rebuilt sample:\n{(rebuilt_a, rebuilt_o, rebuilt_r, rebuilt_d, rebuilt_t)}\n"
+            f"Time step: {debug_ts}, since reset: {debug_ts_res}"
+        )
     else:  # check if values are close
-        if isinstance(original_o, np.ndarray):
-            assert original_po is None or np.allclose(original_po, rebuilt_po, atol=epsilon), f"previous observations don't match:\noriginal:\n{str(original_po)}\n!= rebuilt:\n{str(rebuilt_po)}\nTime step: {debug_ts}, since reset: {debug_ts_res}"
-            assert np.allclose(original_o, rebuilt_o, atol=epsilon), f"observations don't match:\noriginal:\n{str(original_o)}\n!= rebuilt:\n{str(rebuilt_o)}\nTime step: {debug_ts}, since reset: {debug_ts_res}"
-        else:
-            assert original_po is None or str(original_po) == str(rebuilt_po), f"previous observations don't match:\noriginal:\n{str(original_po)}\n!= rebuilt:\n{str(rebuilt_po)}\nTime step: {debug_ts}, since reset: {debug_ts_res}"
-            assert str(original_o) == str(rebuilt_o), f"observations don't match:\noriginal:\n{str(original_o)}\n!= rebuilt:\n{str(rebuilt_o)}\nTime step: {debug_ts}, since reset: {debug_ts_res}"
-        if isinstance(original_a, np.ndarray):
-            assert np.allclose(original_a, rebuilt_a, atol=epsilon), f"actions don't match:\noriginal:\n{str(original_a)}\n!= rebuilt:\n{str(rebuilt_a)}\nTime step: {debug_ts}, since reset: {debug_ts_res}"
-        else:
-            assert str(original_a) == str(rebuilt_a), f"actions don't match:\noriginal:\n{str(original_a)}\n!= rebuilt:\n{str(rebuilt_a)}\nTime step: {debug_ts}, since reset: {debug_ts_res}"
+        if original_po is not None:
+            _assert_close(original_po, rebuilt_po, epsilon, "previous observations", debug_ts, debug_ts_res)
+        _assert_close(original_o, rebuilt_o, epsilon, "observations", debug_ts, debug_ts_res)
+        _assert_close(original_a, rebuilt_a, epsilon, "actions", debug_ts, debug_ts_res)
         assert np.allclose(original_r, rebuilt_r, atol=epsilon), f"rewards don't match:\noriginal:\n{str(original_r)}\n!= rebuilt:\n{str(rebuilt_r)}\nTime step: {debug_ts}, since reset: {debug_ts_res}"
         assert original_d == rebuilt_d, f"terminated don't match:\noriginal:\n{str(original_d)}\n!= rebuilt:\n{str(rebuilt_d)}\nTime step: {debug_ts}, since reset: {debug_ts_res}"
         assert original_t == rebuilt_t, f"truncated don't match:\noriginal:\n{str(original_t)}\n!= rebuilt:\n{str(rebuilt_t)}\nTime step: {debug_ts}, since reset: {debug_ts_res}"
-    print(f"DEBUG: CRC check passed. Time step: {debug_ts}, since reset: {debug_ts_res}")
+    logging.debug(f"CRC check passed. Time step: {debug_ts}, since reset: {debug_ts_res}")
 
 
 class BaseMemory(ABC):
@@ -53,7 +86,7 @@ class BaseMemory(ABC):
                  device,
                  memory_size=1000000,
                  batch_size=256,
-                 sample_preprocessor:callable = None,
+                 sample_preprocessor: Callable = None,
                  dataset_path="",
                  crc_debug=False):
         """
@@ -87,7 +120,7 @@ class BaseMemory(ABC):
         Must append a Buffer object to the memory.
 
         Args:
-            buffer (tmrl.networking.Buffer): the buffer of samples to append.
+            buffer (tmrl.core.networking.Buffer): the buffer of samples to append.
         """
         raise NotImplementedError
 
@@ -137,7 +170,7 @@ class Memory(BaseMemory, ABC):
     """
     def __init__(self,
                  device,
-                 sample_preprocessor: callable = None,
+                 sample_preprocessor: Callable = None,
                  memory_size=1000000,
                  batch_size=256,
                  dataset_path="",
@@ -159,27 +192,22 @@ class Memory(BaseMemory, ABC):
                          crc_debug=crc_debug)
 
         # Benchmarking stats
-        self.sampling_time = 0
-        self.collating_time = 0
+        self.sampling_time = 0.0
+        self.collating_time = 0.0
         self.nb_iterations = 0
 
         # init data
-        self.path = Path(dataset_path)
-        logging.debug(f"Memory self.path:{self.path}")
-        if os.path.isfile(self.path / 'data.pkl'):
+        self.path = Path(dataset_path) if dataset_path else None
+        logging.debug(f"Memory self.path: {self.path}")
+        if self.path is not None and (self.path / 'data.pkl').is_file():
             with open(self.path / 'data.pkl', 'rb') as f:
                 self.data = list(pickle.load(f))
         else:
-            logging.info("no data found, initializing empty replay memory")
+            logging.info("No data found, initializing empty replay memory")
             self.data = []
 
         if len(self) > self.memory_size:
-            # TODO: crop to memory_size
-            logging.warning(f"the dataset length ({len(self)}) is longer than memory_size ({self.memory_size})")
-
-    # def __iter__(self):
-    #     for _ in range(self.nb_steps):
-    #         yield self.sample()
+            logging.warning(f"The dataset length ({len(self)}) is longer than memory_size ({self.memory_size})")
 
     def get_benchmarks(self):
         if self.nb_iterations == 0:
@@ -269,4 +297,7 @@ class Memory(BaseMemory, ABC):
         return batch
 
     def sample_indices(self):
-        return (randint(0, len(self) - 1) for _ in range(self.batch_size))
+        n = len(self)
+        if n <= 0:
+            raise ValueError("Cannot sample from an empty replay memory.")
+        return (randint(0, n - 1) for _ in range(self.batch_size))

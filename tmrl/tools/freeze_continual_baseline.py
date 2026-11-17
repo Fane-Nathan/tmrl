@@ -71,19 +71,25 @@ def freeze_sources(
     output_dir: Path,
     repo_root: Path,
 ) -> dict[str, Any]:
+    """Copy ``sources`` into ``output_dir`` with SHA-256 checksums and manifest."""
     output_dir = output_dir.resolve()
     sources = [source.resolve(strict=True) for source in sources]
-    if output_dir.exists() and any(output_dir.iterdir()):
-        raise FileExistsError(f"Baseline directory is not empty: {output_dir}")
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    artifacts = []
-    for index, source in enumerate(sources):
+    for source in sources:
         if not source.is_file():
             raise ValueError(f"Baseline source is not a file: {source}")
         if output_dir == source.parent or output_dir in source.parents:
             raise ValueError("Baseline output cannot contain one of its sources")
+    if output_dir.exists():
+        if not output_dir.is_dir():
+            raise NotADirectoryError(
+                f"Baseline output path is not a directory: {output_dir}"
+            )
+        if any(output_dir.iterdir()):
+            raise FileExistsError(f"Baseline directory is not empty: {output_dir}")
+    output_dir.mkdir(parents=True, exist_ok=True)
 
+    artifacts = []
+    for index, source in enumerate(sources):
         before = source.stat()
         destination = output_dir / f"{index:02d}_{source.name}"
         partial = output_dir / f".{destination.name}.partial"
@@ -100,8 +106,8 @@ def freeze_sources(
                 raise RuntimeError(
                     f"Source changed while it was being copied: {source}"
                 )
+            shutil.copystat(source, partial)
             os.replace(partial, destination)
-            shutil.copystat(source, destination)
         except BaseException:
             partial.unlink(missing_ok=True)
             raise

@@ -5,6 +5,7 @@ Captures the TrackMania game viewport and extracts 128-dimensional visual tokens
 using a lightweight convolutional neural network.
 """
 
+import logging
 import math
 import platform
 import time
@@ -17,9 +18,14 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 if platform.system() == "Windows":
-    import win32gui
-    import win32ui
-    import win32con
+    try:
+        import win32gui
+        import win32ui
+        import win32con
+    except ImportError:
+        win32gui = None
+        win32ui = None
+        win32con = None
 
 
 class FastWindowCapture:
@@ -94,11 +100,11 @@ class FastWindowCapture:
             try:
                 import ctypes
                 ctypes.windll.user32.MoveWindow(self.hwnd, x, y, w + self.w_diff, h + self.h_diff, True)
-                print(f"[+] Snapped TrackMania window to {w}x{h} at ({x}, {y})")
+                logging.info("Snapped TrackMania window to %dx%d at (%d, %d)", w, h, x, y)
             except Exception:
                 try:
                     win32gui.MoveWindow(self.hwnd, x, y, w + self.w_diff, h + self.h_diff, True)
-                    print(f"[+] Snapped TrackMania window to {w}x{h} at ({x}, {y})")
+                    logging.info("Snapped TrackMania window to %dx%d at (%d, %d)", w, h, x, y)
                 except Exception:
                     pass
 

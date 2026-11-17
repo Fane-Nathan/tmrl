@@ -1,5 +1,126 @@
 [build-system]
-requires = [
-    "setuptools",
-]
+requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
+
+[project]
+name = "tmrl"
+version = "0.7.1"
+description = "Network-based framework for real-time robot learning"
+readme = { file = "readme/pypi.md", content-type = "text/markdown" }
+license = { text = "MIT" }
+requires-python = ">=3.10"
+authors = [
+    { name = "Yann Bouteiller", email = "yann.bouteiller@polymtl.ca" },
+    { name = "Edouard Geze", email = "edouard.geze@hotmail.fr" },
+]
+keywords = [
+    "reinforcement learning",
+    "robot learning",
+    "trackmania",
+    "self driving",
+    "roborace",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Education",
+    "Intended Audience :: Information Technology",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Games/Entertainment",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "numpy",
+    "pandas",
+    "gymnasium",
+    "rtgym>=0.13",
+    "requests",
+    "tlspyo>=0.2.5",
+    "packaging",
+    "cloudpickle",
+    "pyyaml",
+]
+
+[project.optional-dependencies]
+torch = [
+    "torch>=2.0",
+    "safetensors",
+    "psutil",
+]
+jax = [
+    "jax",
+    "jaxlib",
+    "flax",
+    "optax",
+]
+trackmania = [
+    "opencv-python",
+    "vgamepad>=0.1.0",
+    "pywin32>=303; sys_platform == 'win32'",
+    "dxcam>=0.3.0; sys_platform == 'win32'",
+    "pyautogui; sys_platform == 'win32'",
+    "mss; sys_platform == 'linux'",
+]
+trackmania-win = [
+    "opencv-python",
+    "pywin32>=303",
+    "dxcam>=0.3.0",
+    "vgamepad",
+    "pyautogui",
+]
+trackmania-linux = [
+    "opencv-python",
+    "mss",
+    "vgamepad>=0.1.0",
+]
+wandb = [
+    "wandb",
+]
+mujoco = [
+    "torch>=2.0",
+    "gymnasium[mujoco]>=1.0",
+    "matplotlib>=3.8",
+    "psutil>=5.9",
+]
+dev = [
+    "pytest",
+    "pyinstrument",
+]
+docs = [
+    "sphinx==7.2.6",
+    "sphinx_rtd_theme==2.0.0",
+    "readthedocs-sphinx-search==0.3.2",
+    "nbsphinx",
+]
+all = [
+    "tmrl[torch,jax,trackmania,wandb,dev]",
+]
+
+[project.scripts]
+tmrl = "tmrl.__main__:cli"
+tmrl-init = "tmrl.tools.init_package.init_tmrl:main"
+
+[project.urls]
+Homepage = "https://github.com/trackmania-rl/tmrl"
+Repository = "https://github.com/trackmania-rl/tmrl"
+Documentation = "https://tmrl.readthedocs.io/en/latest/"
+
+[tool.setuptools]
+include-package-data = false
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["tmrl*"]
+exclude = [
+    "tests*",
+    "experiments*",
+    "scripts*",
+    "tutorial*",
+    "docs*",
+    "fault_benchmark_results*",
+]

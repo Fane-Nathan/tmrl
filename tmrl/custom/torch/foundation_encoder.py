@@ -46,16 +46,16 @@ class FoundationVisualTelemetryEncoder(nn.Module):
         base_file = Path(base_foundation_path)
 
         if model_file.exists():
-            print(f"[+] FoundationEncoder: Loading pre-trained MultiModalCarBrain from {model_file}")
+            logging.info("FoundationEncoder: Loading pre-trained MultiModalCarBrain from %s", model_file)
             self.brain = MultiModalCarBrain(d_model=256, n_layers=6, n_heads=8)
             self.brain.load_state_dict(
                 self._read_state_dict(model_file, "cpu"), strict=True
             )
         elif base_file.exists():
-            print(f"[+] FoundationEncoder: Initializing from 1M foundation physics weights: {base_file}")
+            logging.info("FoundationEncoder: Initializing from 1M foundation physics weights: %s", base_file)
             self.brain = MultiModalCarBrain.from_foundation(str(base_file), device="cpu")
         else:
-            print("[-] FoundationEncoder: No pre-trained weights found! Initializing fresh MultiModalCarBrain.")
+            logging.warning("FoundationEncoder: No pre-trained weights found! Initializing fresh MultiModalCarBrain.")
             self.brain = MultiModalCarBrain(d_model=256, n_layers=6, n_heads=8)
 
         # Projection from 256-dim fused multi-modal token to Dreamer's 128-dim latent space
@@ -73,7 +73,7 @@ class FoundationVisualTelemetryEncoder(nn.Module):
 
         self.set_foundation_trainable(not self.freeze_foundation)
         if self.freeze_foundation:
-            print("[+] FoundationEncoder: Foundation backbone frozen.")
+            logging.info("FoundationEncoder: Foundation backbone frozen.")
 
     @staticmethod
     def _read_state_dict(model_file: Path, device):

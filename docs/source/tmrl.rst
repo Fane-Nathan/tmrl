@@ -13,9 +13,9 @@ Module list
 .. toctree::
    :maxdepth: 4
 
-   tmrl.networking
-   tmrl.actor
-   tmrl.training
-   tmrl.training_offline
-   tmrl.memory
-   tmrl.envs
+   tmrl.core.networking
+   tmrl.core.actor
+   tmrl.core.training
+   tmrl.core.training_offline
+   tmrl.core.memory
+   tmrl.core.envs

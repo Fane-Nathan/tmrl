@@ -1,3 +1,4 @@
+import argparse
 import os
 import sys
 import time
@@ -14,12 +15,33 @@ from tmrl.core.jax.util import get_rngs
 from tmrl.custom.jax.imagination_trainer import LatentImaginationTrainer
 
 
-def main():
+def parse_args(argv=None):
+    default_ckpt = str(
+        getattr(
+            cfg,
+            "CHECKPOINT_PATH",
+            Path.home() / "TmrlData" / "checkpoints" / "ReplayWorldModel_t.tcpt",
+        )
+    )
+    parser = argparse.ArgumentParser(
+        description="Train a replay-grounded latent world model and imagination policy from a TMRL checkpoint."
+    )
+    parser.add_argument(
+        "--checkpoint",
+        type=str,
+        default=default_ckpt,
+        help="Path to the .tcpt trainer checkpoint containing a replay memory.",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv=None):
+    args = parse_args(argv)
     print("=" * 75)
     print("  TRAINING A REPLAY-GROUNDED LATENT WORLD MODEL AND IMAGINATION POLICY")
     print("=" * 75)
 
-    cpt_path = r"C:\Users\felix\TmrlData\checkpoints\AbsoluteZero_Test_t.tcpt"
+    cpt_path = args.checkpoint
     if not os.path.exists(cpt_path):
         print(f"Checkpoint not found at {cpt_path}")
         return
@@ -31,17 +53,17 @@ def main():
 
     # Inspect checkpoint object
     memory = None
-    if hasattr(cpt, 'memory'):
+    if hasattr(cpt, "memory"):
         memory = cpt.memory
-    elif isinstance(cpt, dict) and 'memory' in cpt:
-        memory = cpt['memory']
-    
+    elif isinstance(cpt, dict) and "memory" in cpt:
+        memory = cpt["memory"]
+
     if memory is None:
         print("    [!] Could not locate memory attribute on checkpoint, using cpt directly.")
         memory = cpt
 
     print(f"[2] Replay Buffer Type: {type(memory)}", flush=True)
-    if hasattr(memory, '__len__'):
+    if hasattr(memory, "__len__"):
         print(f"    Total transitions in buffer: {len(memory)}", flush=True)
 
     # Initialize Imagination Trainer
@@ -54,7 +76,7 @@ def main():
         lr_actor=1e-4,
         lr_critic=3e-4,
         lr_adv=1e-4,
-        rngs=rngs
+        rngs=rngs,
     )
     print("[3] Initialized latent world model, actor, and critic (proposer disabled).", flush=True)
 

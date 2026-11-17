@@ -1,6 +1,6 @@
 # Tutorial: TMRL as a Python library
 
-:house: _Homepage: [TMRL Python tutorials](https://github.com/trackmania-rl/tmrl/tree/master/tmrl/tuto)_
+:house: _Homepage: [TMRL Python tutorials](https://github.com/trackmania-rl/tmrl/tree/master/tutorial)_
 
 In other sections, we have seen how to use `tmrl` as a standalone program, thanks to the ready-to-use training pipeline for TrackMania.
 
@@ -9,15 +9,15 @@ This is when you need to start using `tmrl` as a python library.
 
 In this tutorial, we will learn from A to Z how to implement our own specialized pipeline, in our own robot environment, with our own training algorithm.
 
-The full script of the tutorial is available [here](https://github.com/trackmania-rl/tmrl/blob/master/tmrl/tuto/tuto.py).
+The full script of the tutorial is available [here](https://github.com/trackmania-rl/tmrl/blob/master/tutorial/tuto.py).
 
 You may also want to read the [API documentation](https://tmrl.readthedocs.io/en/latest/).
 
-In complement, you can find a minimal `tmrl` pipeline for the real-time environment used in this tutorial [here](https://github.com/trackmania-rl/tmrl/blob/master/tmrl/tuto/tuto_minimal_drone.py).
-You can also find a minimal `tmrl` pipeline for non-real-time environments (e.g., Pendulum) [here](https://github.com/trackmania-rl/tmrl/blob/master/tmrl/tuto/tuto_minimal_pendulum_torch.py).
+In complement, you can find a minimal `tmrl` pipeline for the real-time environment used in this tutorial [here](https://github.com/trackmania-rl/tmrl/blob/master/tutorial/tuto_minimal_drone.py).
+You can also find a minimal `tmrl` pipeline for non-real-time environments (e.g., Pendulum) [here](https://github.com/trackmania-rl/tmrl/blob/master/tutorial/tuto_minimal_pendulum_torch.py).
 
 **Note: some modules can be implemented independently.
-If you are here because you wish to implement your own training algorithm in TrackMania, you should read the [competition tutorial](https://github.com/trackmania-rl/tmrl/blob/master/tmrl/tuto/competition/custom_actor_module.py) instead.**
+If you are here because you wish to implement your own training algorithm in TrackMania, you should read the [competition tutorial](https://github.com/trackmania-rl/tmrl/blob/master/tutorial/competition/custom_actor_module.py) instead.**
 
 ## Installation:
 
@@ -58,7 +58,7 @@ If you think an option to install `tmrl` without support for TrackMania should e
         - [Training parameters](#training-parameters)
     - [Instantiate and run](#instantiate-and-run-the-trainer)
 - [CRC debugging](#crc-debugging)
-- [Full script](https://github.com/trackmania-rl/tmrl/blob/master/tmrl/tuto/tuto.py)
+- [Full script](https://github.com/trackmania-rl/tmrl/blob/master/tutorial/tuto.py)
 
 ## Tools
 
@@ -363,7 +363,7 @@ This history of actions is required to make the observation space Markov because
 ### Actor class
 The second argument is `actor_module_cls`.
 
-This expects a class that implements the [ActorModule](https://github.com/trackmania-rl/tmrl/blob/master/tmrl/actor.py) interface.
+This expects a class that implements the [ActorModule](https://github.com/trackmania-rl/tmrl/blob/master/tmrl/core/actor.py) interface.
 When using pytorch, we can conveniently use `TorchActorModule` instead, which partially implements this interface.
 `TorchActorModule` is a pytorch neural network (i.e., a subclass of `torch.nn.Module`) that implements an extra `act()` method on top of the usual `forward()` method.
 The neural network is what will be trained by the Trainer (our policy), while the `act()` method is for the `RolloutWorker` to interact with this policy.
@@ -693,7 +693,7 @@ You can ignore these for now.
 Now, the real beast is the `training_cls` argument.
 This expects a training class, possibly partially initialized.
 
-At the moment, `tmrl` supports one training class called [TrainingOffline](https://github.com/trackmania-rl/tmrl/blob/master/tmrl/training_offline.py).
+At the moment, `tmrl` supports one training class called [TrainingOffline](https://github.com/trackmania-rl/tmrl/blob/master/tmrl/core/training_offline.py).
 This class is meant for off-policy asynchronous RL algorithms such as SAC.
 With a few synchronization tricks, it can also be used for online algorithms such as PPO
 _(see the note at the end of the "Rollout workers" section)_.
@@ -800,7 +800,7 @@ class TorchMemory(ABC):
 You do not need to worry about `device` and `nb_steps`, as they will be set automatically by the `Trainer` and are for the superclass.
 
 `sample_preprocessor` can be used if you wish to implement data augmentation before the samples are used for training.
-We will not do this in the tutorial, but you can find a no-op example [here](https://github.com/trackmania-rl/tmrl/blob/c1f740740a7d57382a451607fdc66d92ba62ea0c/tmrl/custom/custom_preprocessors.py#L41) (for syntax).
+We will not do this in the tutorial, but you can find a no-op example [here](https://github.com/trackmania-rl/tmrl/blob/master/tmrl/custom/tm/tm_preprocessors.py) (for syntax).
 This argument is also only to be passed to the superclass.
 
 `memory_size` is the maximum number of transitions that can be contained in your `TorchMemory` object.
@@ -863,7 +863,7 @@ This decompression may happen either in `append_buffer()` (if you privilege samp
 In this tutorial, we will privilege memory usage and thus we will implement our decompression scheme in `get_transition()`.
 The `append_buffer()` method will simply store the compressed sample components in `self.data`.
 
-`append_buffer()` is passed a [buffer](https://github.com/trackmania-rl/tmrl/blob/c1f740740a7d57382a451607fdc66d92ba62ea0c/tmrl/networking.py#L198) object that contains a list of compressed `(act, new_obs, rew, terminated, truncated, info)` samples in its `memory` attribute.
+`append_buffer()` is passed a [buffer](https://github.com/trackmania-rl/tmrl/blob/master/tmrl/core/networking.py) object that contains a list of compressed `(act, new_obs, rew, terminated, truncated, info)` samples in its `memory` attribute.
 `act` is the action that was sent to the `step()` method of the Gymnasium environment to yield `new_obs`, `rew`, `terminated`, `truncated`, and `info`.
 Here, we decompose our samples in their relevant components, we append these components to the `self.data` list, and we truncate `self.data` when `self.memory_size` is exceeded:
 
@@ -1018,7 +1018,7 @@ This is because this default action will be applied right after `reset()` is cal
 If you are instead using a vanilla `Gymnasium` environment, `tmrl` will set this action to `None`, as you should ignore it anyway in non-real-time environments.
 Because this is an intricate effect specific to real-time environments, we will ignore it for now and come back to it at the very end of this tutorial.
 Just bear in mind that, if you want your pipeline to be 100% correct in real-time scenarios, you need to take special care for rebuilding transitions that happened after a `terminated` or `truncated` signal is set to `True`.
-This is done in the `tmrl` implementation of [TorchMemory for TrackMania](https://github.com/trackmania-rl/tmrl/blob/master/tmrl/custom/custom_memories.py)._
+This is done in the `tmrl` implementation of [TorchMemory for TrackMania](https://github.com/trackmania-rl/tmrl/blob/master/tmrl/custom/torch/custom_memories.py)._
 
 We now have our `memory_cls` argument:
 
@@ -1428,27 +1428,27 @@ DEBUG: CRC check passed. Time step: 24, since reset: 23
 DEBUG: CRC check passed. Time step: 259, since reset: 56
 
 Traceback (most recent call last):
-  File ".../tmrl/tmrl/tuto/tuto.py", line 535, in <module>
+  File ".../tmrl/tutorial/tuto.py", line 535, in <module>
     run_trainer(my_trainer)
-  File ".../tmrl/tmrl/tuto/tuto.py", line 528, in run_trainer
+  File ".../tmrl/tutorial/tuto.py", line 528, in run_trainer
     trainer.run()
-  File ".../tmrl/tmrl/networking.py", line 394, in run
+  File ".../tmrl/tmrl/core/networking.py", line 394, in run
     run(interface=self.interface,
-  File ".../tmrl/tmrl/networking.py", line 327, in run
+  File ".../tmrl/tmrl/core/networking.py", line 327, in run
     for stats in iterate_epochs(...):
-  File ".../tmrl/tmrl/networking.py", line 270, in iterate_epochs
+  File ".../tmrl/tmrl/core/networking.py", line 270, in iterate_epochs
     yield run_instance.run_epoch(interface=interface)
-  File ".../tmrl/tmrl/training_offline.py", line 114, in run_epoch
+  File ".../tmrl/tmrl/core/training_offline.py", line 114, in run_epoch
     for batch in self.memory:
-  File ".../tmrl/tmrl/memory.py", line 89, in __iter__
+  File ".../tmrl/tmrl/core/memory.py", line 89, in __iter__
     yield self.sample()
-  File ".../tmrl/tmrl/memory.py", line 152, in sample
+  File ".../tmrl/tmrl/core/memory.py", line 152, in sample
     batch = [self[idx] for idx in indices]
-  File ".../tmrl/tmrl/memory.py", line 152, in <listcomp>
+  File ".../tmrl/tmrl/core/memory.py", line 152, in <listcomp>
     batch = [self[idx] for idx in indices]
-  File ".../tmrl/tmrl/memory.py", line 169, in __getitem__
+  File ".../tmrl/tmrl/core/memory.py", line 169, in __getitem__
     check_samples_crc(...)
-  File ".../tmrl/tmrl/memory.py", line 22, in check_samples_crc
+  File ".../tmrl/tmrl/core/memory.py", line 22, in check_samples_crc
 
 AssertionError: previous observations don't match:
 

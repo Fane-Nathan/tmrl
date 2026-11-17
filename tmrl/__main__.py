@@ -1,47 +1,131 @@
+"""Command-line entry point for TMRL."""
+
+from argparse import ArgumentParser
 import json
 import logging
+import platform
 import sys
 import time
-from argparse import ArgumentParser, ArgumentTypeError
-
-from tmrl.tools.init_package.init_tmrl import TMRL_FOLDER as _TMRL_FOLDER
-import tmrl.config.config_constants as cfg
-
-# Desktop Duplication must be created before importing the torch-dependent
-# configuration graph on hybrid-GPU Windows systems.
-_CAPTURE_COMMANDS = {
-    "--worker",
-    "--expert",
-    "--test",
-    "--benchmark",
-    "--check-environment",
-    "--record-reward",
-}
-if any(argument in _CAPTURE_COMMANDS for argument in sys.argv[1:]):
-    from tmrl.custom.tm.utils.window import preinitialize_dxcam_capture
-
-    preinitialize_dxcam_capture()
-
-import tmrl.config.config_objects as cfg_obj
-
-from tmrl.core.envs import GenericGymEnv
-from tmrl.core.networking import Server, Trainer, RolloutWorker
-from tmrl.core.util import partial
-
-from tmrl.tools.check_environment import check_env_tm20lidar, check_env_tm20full
-from tmrl.tools.record import record_reward_dist
+from typing import Sequence
 
 
-def main(args):
+def build_parser() -> ArgumentParser:
+    """Create the argument parser for ``python -m tmrl``."""
+    parser = ArgumentParser()
+    parser.add_argument(
+        "--install",
+        action="store_true",
+        help="checks TMRL installation",
+    )
+    parser.add_argument(
+        "--server",
+        action="store_true",
+        help="launches the server",
+    )
+    parser.add_argument(
+        "--trainer",
+        action="store_true",
+        help="launches the trainer",
+    )
+    parser.add_argument(
+        "--worker",
+        action="store_true",
+        help="launches a rollout worker",
+    )
+    parser.add_argument(
+        "--expert",
+        action="store_true",
+        help="launches an expert rollout worker (no model update)",
+    )
+    parser.add_argument(
+        "--test",
+        action="store_true",
+        help="runs inference without training",
+    )
+    parser.add_argument(
+        "--benchmark",
+        action="store_true",
+        help="runs a benchmark of the environment",
+    )
+    parser.add_argument(
+        "--record-reward",
+        dest="record_reward",
+        action="store_true",
+        help="utility to record a reward function in TM20",
+    )
+    parser.add_argument(
+        "--use-keyboard",
+        dest="use_keyboard",
+        action="store_true",
+        help="modifier for --record-reward",
+    )
+    parser.add_argument(
+        "--check-environment",
+        dest="check_env",
+        action="store_true",
+        help="utility to check the environment",
+    )
+    parser.add_argument(
+        "--wandb",
+        dest="wandb",
+        action="store_true",
+        help="(use with --trainer) if you want to log results on Weights and Biases, use this option",
+    )
+    parser.add_argument(
+        "-d",
+        "--config",
+        type=json.loads,
+        default={},
+        help="dictionary containing configuration options (modifiers) for the rtgym environment",
+    )
+    return parser
+
+
+def _maybe_preinitialize_dxcam() -> None:
+    """Initialize DXcam on Windows before torch/config_objects are imported."""
+    if platform.system() == "Windows":
+        from tmrl.custom.tm.utils.window import preinitialize_dxcam_capture
+
+        preinitialize_dxcam_capture()
+
+
+def _require_config_file() -> None:
+    """Verify that the active TMRL config file exists before launching runtime roles."""
+    import tmrl.config.config_constants as cfg
+
+    if not cfg.CONFIG_FILE.is_file():
+        raise FileNotFoundError(
+            f"TMRL configuration file not found at {cfg.CONFIG_FILE}. "
+            "Run `python -m tmrl --install` first to initialize TmrlData."
+        )
+
+
+def _dispatch(args, parser: ArgumentParser) -> None:
     if args.server:
-        serv = Server()
+        _require_config_file()
+        from tmrl.core.networking import Server
+
+        _ = Server()
         while True:
             time.sleep(1.0)
+
     elif args.worker or args.test or args.benchmark or args.expert:
-        config = cfg_obj.CONFIG_DICT
-        config_modifiers = args.config
-        for k, v in config_modifiers.items():
-            config[k] = v
+        if not isinstance(args.config, dict):
+            parser.error("--config/-d must decode to a JSON object (dictionary).")
+        _require_config_file()
+
+        # Desktop Duplication must be created before importing the torch-dependent
+        # configuration graph on hybrid-GPU Windows systems.
+        _maybe_preinitialize_dxcam()
+
+        import tmrl.config.config_constants as cfg
+        import tmrl.config.config_objects as cfg_obj
+        from tmrl.core.envs import GenericGymEnv
+        from tmrl.core.networking import RolloutWorker
+        from tmrl.core.util import partial
+
+        config = dict(cfg_obj.CONFIG_DICT)
+        config.update(args.config)
         worker_device = (
             str(cfg_obj.FOUNDATION_CONFIG.get("WORKER_DEVICE", "cpu"))
             if cfg_obj.IS_JAX_DREAMER
@@ -49,16 +133,22 @@ def main(args):
             if cfg.CUDA_INFERENCE
             else "cpu"
         )
-        rw = RolloutWorker(env_cls=partial(GenericGymEnv, id=cfg.RTGYM_VERSION, gym_kwargs={"config": config}),
-                           actor_module_cls=cfg_obj.POLICY,
-                           sample_compressor=cfg_obj.SAMPLE_COMPRESSOR,
-                           device=worker_device,
-                           server_ip=cfg.SERVER_IP_FOR_WORKER,
-                           max_samples_per_episode=cfg.RW_MAX_SAMPLES_PER_EPISODE,
-                           model_path=cfg.MODEL_PATH_WORKER,
-                           obs_preprocessor=cfg_obj.OBS_PREPROCESSOR,
-                           crc_debug=cfg.CRC_DEBUG,
-                           standalone=args.test)
+        rw = RolloutWorker(
+            env_cls=partial(
+                GenericGymEnv,
+                id=cfg.RTGYM_VERSION,
+                gym_kwargs={"config": config},
+            ),
+            actor_module_cls=cfg_obj.POLICY,
+            sample_compressor=cfg_obj.SAMPLE_COMPRESSOR,
+            device=worker_device,
+            server_ip=cfg.SERVER_IP_FOR_WORKER,
+            max_samples_per_episode=cfg.RW_MAX_SAMPLES_PER_EPISODE,
+            model_path=cfg.MODEL_PATH_WORKER,
+            obs_preprocessor=cfg_obj.OBS_PREPROCESSOR,
+            crc_debug=cfg.CRC_DEBUG,
+            standalone=args.test,
+        )
         if args.test:
             rw.run_episodes(10000)
         elif args.worker:
@@ -69,14 +159,21 @@ def main(args):
             rw.run_env_benchmark(nb_steps=1000, test=False)
         else:
             rw.run_episodes(10000)
+
     elif args.trainer:
-        trainer = Trainer(training_cls=cfg_obj.TRAINER,
-                          server_ip=cfg.SERVER_IP_FOR_TRAINER,
-                          model_path=cfg.MODEL_PATH_TRAINER,
-                          checkpoint_path=cfg.CHECKPOINT_PATH,
-                          dump_run_instance_fn=cfg_obj.DUMP_RUN_INSTANCE_FN,
-                          load_run_instance_fn=cfg_obj.LOAD_RUN_INSTANCE_FN,
-                          updater_fn=cfg_obj.UPDATER_FN)
+        import tmrl.config.config_constants as cfg
+        import tmrl.config.config_objects as cfg_obj
+        from tmrl.core.networking import Trainer
+
+        trainer = Trainer(
+            training_cls=cfg_obj.TRAINER,
+            server_ip=cfg.SERVER_IP_FOR_TRAINER,
+            model_path=cfg.MODEL_PATH_TRAINER,
+            checkpoint_path=cfg.CHECKPOINT_PATH,
+            dump_run_instance_fn=cfg_obj.DUMP_RUN_INSTANCE_FN,
+            load_run_instance_fn=cfg_obj.LOAD_RUN_INSTANCE_FN,
+            updater_fn=cfg_obj.UPDATER_FN,
+        )
         logging.info(f"--- NOW RUNNING {cfg_obj.ALG_NAME} on TrackMania ---")
         if cfg_obj.IS_JAX_DREAMER:
             dreamer = cfg_obj.CONTINUAL_DREAMER_CONFIG
@@ -116,39 +213,69 @@ def main(args):
                 azr.get("HORIZON", 3),
                 azr.get("SOLVER_ATTEMPTS", 8),
             )
+
         if args.wandb:
-            trainer.run_with_wandb(entity=cfg.WANDB_ENTITY,
-                                   project=cfg.WANDB_PROJECT,
-                                   run_id=cfg.WANDB_RUN_ID)
+            trainer.run_with_wandb(
+                entity=cfg.WANDB_ENTITY,
+                project=cfg.WANDB_PROJECT,
+                run_id=cfg.WANDB_RUN_ID,
+            )
         else:
             trainer.run()
+
     elif args.record_reward:
-        record_reward_dist(path_reward=cfg.REWARD_PATH, use_keyboard=args.use_keyboard)
+        import tmrl.config.config_constants as cfg
+        from tmrl.tools.record import record_reward_dist
+
+        record_reward_dist(
+            path_reward=cfg.REWARD_PATH,
+            use_keyboard=args.use_keyboard,
+        )
+
     elif args.check_env:
+        _maybe_preinitialize_dxcam()
+        import tmrl.config.config_constants as cfg
+        from tmrl.tools.check_environment import (
+            check_env_tm20full,
+            check_env_tm20lidar,
+        )
+
         if cfg.PRAGMA_LIDAR:
             check_env_tm20lidar()
         else:
             check_env_tm20full()
+
     elif args.install:
-        logging.info(f"TMRL folder: {cfg.TMRL_FOLDER}")
+        from tmrl.tools.init_package.init_tmrl import ensure_tmrl_data
+
+        tmrl_folder = ensure_tmrl_data()
+        logging.info(f"TMRL folder: {tmrl_folder}")
+
     else:
-        raise ArgumentTypeError('Enter a valid argument')
+        parser.error(
+            "Specify an action flag (e.g. --install, --server, --trainer, "
+            "--worker, --expert, --test, --benchmark, --record-reward, "
+            "--check-environment)."
+        )
+
+
+def cli(argv: Sequence[str] | None = None) -> int:
+    """Parse CLI arguments, configure logging, and run the requested command."""
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    logging.basicConfig(stream=sys.stdout, level=logging.INFO)
+    _dispatch(args, parser)
+    return 0
+
+
+def main(args=None) -> int:
+    """Backwards-compatible entry point accepting an ``Namespace`` or ``argv``."""
+    if args is None or isinstance(args, (list, tuple)):
+        return cli(args)
+    logging.basicConfig(stream=sys.stdout, level=logging.INFO)
+    _dispatch(args, build_parser())
+    return 0
 
 
 if __name__ == "__main__":
-    parser = ArgumentParser()
-    parser.add_argument('--install', action='store_true', help='checks TMRL installation')
-    parser.add_argument('--server', action='store_true', help='launches the server')
-    parser.add_argument('--trainer', action='store_true', help='launches the trainer')
-    parser.add_argument('--worker', action='store_true', help='launches a rollout worker')
-    parser.add_argument('--expert', action='store_true', help='launches an expert rollout worker (no model update)')
-    parser.add_argument('--test', action='store_true', help='runs inference without training')
-    parser.add_argument('--benchmark', action='store_true', help='runs a benchmark of the environment')
-    parser.add_argument('--record-reward', dest='record_reward', action='store_true', help='utility to record a reward function in TM20')
-    parser.add_argument('--use-keyboard', dest='use_keyboard', action='store_true', help='modifier for --record-reward')
-    parser.add_argument('--check-environment', dest='check_env', action='store_true', help='utility to check the environment')
-    parser.add_argument('--wandb', dest='wandb', action='store_true', help='(use with --trainer) if you want to log results on Weights and Biases, use this option')
-    parser.add_argument('-d', '--config', type=json.loads, default={}, help='dictionary containing configuration options (modifiers) for the rtgym environment')
-    arguments = parser.parse_args()
-
-    main(arguments)
+    raise SystemExit(cli())

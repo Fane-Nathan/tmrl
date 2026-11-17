@@ -1,25 +1,23 @@
-# standard library imports
-
 # third-party imports
 import gymnasium
 
 # local imports
-from tmrl.core.wrappers import (AffineObservationWrapper)
+from tmrl.core.wrappers import AffineObservationWrapper
 
 
 __docformat__ = "google"
 
 
 class GenericGymEnv(gymnasium.Wrapper):
-    def __init__(self, id: str = "Pendulum-v0", gym_kwargs=None, obs_scale: float = 0., wrappers=None):
+    def __init__(self, id: str = "Pendulum-v1", gym_kwargs=None, obs_scale: float = 0., wrappers=None):
         """
         Use this wrapper when using the framework with arbitrary environments.
 
         Args:
-            id (str): gymnasium id
-            gym_kwargs (dict): keyword arguments of the gymnasium environment (i.e. between -1.0 and 1.0 when the actual action space is something else)
-            obs_scale (float): change this if wanting to rescale actions by a scalar
-            wrappers (list): list of tuples (gymnasium.Wrapper, args, kwargs)
+            id (str): gymnasium environment id
+            gym_kwargs (dict): keyword arguments passed to ``gymnasium.make``
+            obs_scale (float): scalar factor used to rescale observations when non-zero
+            wrappers (list): list of tuples ``(wrapper_cls, args, kwargs)``
         """
         if gym_kwargs is None:
             gym_kwargs = {}
@@ -31,10 +29,4 @@ class GenericGymEnv(gymnasium.Wrapper):
             for wrapper, args, kwargs in wrappers:
                 env = wrapper(env, *args, **kwargs)
 
-        # assert isinstance(env.action_space, gymnasium.spaces.Box), f"{env.action_space}"
-        # env = NormalizeActionWrapper(env)
         super().__init__(env)
-
-
-if __name__ == '__main__':
-    pass

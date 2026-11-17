@@ -1,47 +1,74 @@
+"""Distributed networking primitives (`Server`, `Trainer`, `RolloutWorker`, `Buffer`)."""
+
 # standard library imports
-import datetime
-import os
-import socket
-import time
 import atexit
-import json
-import shutil
-import tempfile
+from collections.abc import Sequence
+import datetime
+import functools
 import itertools
-from os.path import exists
+import json
+import logging
+import os
+from pathlib import Path
+import shutil
+import socket
+import tempfile
+import time
+from typing import Callable
 
 # third-party imports
 import numpy as np
-from requests import get
-from tlspyo import Relay, Endpoint
+import requests
+from tlspyo import Endpoint, Relay
 
 # local imports
+import tmrl.config.config_constants as cfg
 from tmrl.core.actor import ActorModule
 from tmrl.core.util import dump, load, partial_to_dict
-import tmrl.config.config_constants as cfg
-
-import logging
 
 
 __docformat__ = "google"
 
+__all__ = [
+    "Buffer",
+    "RolloutWorker",
+    "Server",
+    "Trainer",
+    "TrainerInterface",
+    "dump_run_instance",
+    "iterate_epochs",
+    "load_run_instance",
+    "log_environment_variables",
+    "print_ip",
+    "print_with_timestamp",
+    "run",
+    "run_with_wandb",
+]
 
-# PRINT: ============================================
+
+# === Logging & Network Helpers =======================================================================================
 
 
 def print_with_timestamp(s):
+    """Logs ``s`` at INFO level prefixed with the current local timestamp."""
     x = datetime.datetime.now()
     sx = x.strftime("%x %X ")
     logging.info(sx + str(s))
 
 
 def print_ip():
-    public_ip = get('http://api.ipify.org').text
+    """Logs the machine's public and local IP addresses."""
     local_ip = socket.gethostbyname(socket.gethostname())
+    try:
+        resp = requests.get("https://api.ipify.org", timeout=5.0)
+        resp.raise_for_status()
+        public_ip = resp.text.strip()
+    except requests.RequestException as exc:
+        public_ip = f"unavailable ({exc})"
     print_with_timestamp(f"public IP: {public_ip}, local IP: {local_ip}")
 
 
-# BUFFER: ===========================================
+# === Experience Buffer ===============================================================================================
 
 
 class Buffer:
@@ -99,7 +126,7 @@ class Buffer:
         return self
 
 
-# SERVER SERVER: =====================================
+# === Server ==========================================================================================================
 
 
 class Server:
@@ -117,7 +144,7 @@ class Server:
                  header_size=cfg.HEADER_SIZE,
                  security=cfg.SECURITY,
                  keys_dir=cfg.CREDENTIALS_DIRECTORY,
-                 accepted_groups : None | dict = None):
+                 accepted_groups: None | dict = None):
         """
         Args:
             port (int): tlspyo public port
@@ -143,7 +170,7 @@ class Server:
         self.__relay.stop()
 
 
-# TRAINER: ==========================================
+# === Trainer =========================================================================================================
 
 
 class TrainerInterface:
@@ -165,7 +192,7 @@ class TrainerInterface:
                  model_path=cfg.MODEL_PATH_TRAINER,
                  groups="trainers",
                  target_groups="workers"):
-        
+
         self.groups = (groups,) if isinstance(groups, str) else groups
         self.target_groups = target_groups
         self.model_path = model_path
@@ -184,7 +211,7 @@ class TrainerInterface:
         print_with_timestamp(f"server IP: {self.server_ip}")
 
         self._notify()
-    
+
     def _notify(self):
         groups = {g: -1 for g in self.groups}  # retrieve everything for all member groups
         self.__endpoint.notify(groups=groups)
@@ -200,10 +227,14 @@ class TrainerInterface:
         model must be an ActorModule
         broadcasts the model's weights to all connected RolloutWorkers
         """
+        Path(self.model_path).parent.mkdir(parents=True, exist_ok=True)
         model.save(self.model_path)
         with open(self.model_path, 'rb') as f:
             weights = f.read()
-        self.__endpoint.broadcast(weights, self.target_groups)
+        if isinstance(self.target_groups, str):
+            self.__endpoint.broadcast(weights, self.target_groups)
+        else:
+            self.__endpoint.send_object(weights, {g: -1 for g in self.target_groups})
 
     def retrieve_buffer(self):
         """
@@ -254,65 +285,80 @@ def iterate_epochs(run_cls,
                    epochs_between_checkpoints=1,
                    updater_fn=None):
     """
-    Main training loop (remote)
-    The run_cls instance is saved in checkpoint_path at the end of each epoch
-    The model weights are sent to the RolloutWorker every model_checkpoint_interval epochs
-    Generator yielding episode statistics (list of pd.Series) while running and checkpointing
+    Main training loop (remote).
+
+    When ``checkpoint_path`` is provided, ``run_cls`` is saved every
+    ``epochs_between_checkpoints`` epochs. Model weights are broadcast according
+    to the trainer's ``update_model_interval`` schedule.
+
+    Yields:
+        list[pd.Series]: Episode/round statistics produced by ``run_instance.run_epoch``.
     """
-    checkpoint_path = checkpoint_path or tempfile.mktemp("_remove_on_exit")
+    dump_run_instance_fn = dump_run_instance_fn or dump_run_instance
+    load_run_instance_fn = load_run_instance_fn or load_run_instance
 
-    try:
-        logging.debug(f"checkpoint_path: {checkpoint_path}")
-        if not exists(checkpoint_path):
-            logging.info(f"=== specification ".ljust(70, "="))
-            run_instance = run_cls()
-            dump_run_instance_fn(run_instance, checkpoint_path)
-            logging.info(f"")
-        else:
-            logging.info(f"Loading checkpoint...")
+    if checkpoint_path and epochs_between_checkpoints <= 0:
+        raise ValueError("epochs_between_checkpoints must be >= 1.")
+
+    logging.debug(f"checkpoint_path: {checkpoint_path}")
+    if not checkpoint_path:
+        logging.info("=== specification ".ljust(70, "="))
+        run_instance = run_cls()
+        logging.info("")
+    elif not Path(checkpoint_path).exists():
+        logging.info("=== specification ".ljust(70, "="))
+        run_instance = run_cls()
+        dump_run_instance_fn(run_instance, checkpoint_path)
+        logging.info("")
+    else:
+        logging.info("Loading checkpoint...")
+        t1 = time.time()
+        run_instance = load_run_instance_fn(checkpoint_path)
+        logging.info(f"Loaded checkpoint in {time.time() - t1} seconds.")
+        if updater_fn is not None:
+            logging.info("Updating checkpoint...")
             t1 = time.time()
-            run_instance = load_run_instance_fn(checkpoint_path)
-            logging.info(f" Loaded checkpoint in {time.time() - t1} seconds.")
-            if updater_fn is not None:
-                logging.info(f"Updating checkpoint...")
-                t1 = time.time()
-                run_instance = updater_fn(run_instance, run_cls)
-                logging.info(f"Checkpoint updated in {time.time() - t1} seconds.")
+            run_instance = updater_fn(run_instance, run_cls)
+            logging.info(f"Checkpoint updated in {time.time() - t1} seconds.")
 
-        while run_instance.epoch < run_instance.epochs:
-            # time.sleep(1)  # on network file systems writing files is asynchronous and we need to wait for sync
-            yield run_instance.run_epoch(interface=interface)  # yield stats data frame (this makes this function a generator)
-            if run_instance.epoch % epochs_between_checkpoints == 0:
-                logging.info(f" saving checkpoint...")
-                t1 = time.time()
-                dump_run_instance_fn(run_instance, checkpoint_path)
-                logging.info(f" saved checkpoint in {time.time() - t1} seconds.")
-                # we delete and reload the run_instance from disk to ensure the exact same code runs regardless of interruptions
-                # del run_instance
-                # gc.collect()  # garbage collection
-                # run_instance = load_run_instance_fn(checkpoint_path)
+    while run_instance.epoch < run_instance.epochs:
+        yield run_instance.run_epoch(interface=interface)
+        if checkpoint_path and run_instance.epoch % epochs_between_checkpoints == 0:
+            logging.info("Saving checkpoint...")
+            t1 = time.time()
+            dump_run_instance_fn(run_instance, checkpoint_path)
+            logging.info(f"Saved checkpoint in {time.time() - t1} seconds.")
 
-    finally:
-        if checkpoint_path.endswith("_remove_on_exit") and exists(checkpoint_path):
-            os.remove(checkpoint_path)
+
+def _extract_wandb_config(run_cls):
+    try:
+        if isinstance(run_cls, functools.partial):
+            config = partial_to_dict(run_cls)
+        elif callable(run_cls):
+            config = partial_to_dict(functools.partial(run_cls))
+        else:
+            config = {"run_cls": str(run_cls)}
+    except Exception:
+        config = {"run_cls": getattr(run_cls, "__qualname__", str(run_cls))}
+    config["environ"] = log_environment_variables()
+    return config
 
 
 def run_with_wandb(entity, project, run_id, interface, run_cls, checkpoint_path: str = None, dump_run_instance_fn=None, load_run_instance_fn=None, updater_fn=None):
     """
     Main training loop (remote).
 
-    saves config and stats to https://wandb.com
+    Saves config and stats to https://wandb.com
     """
     dump_run_instance_fn = dump_run_instance_fn or dump_run_instance
     load_run_instance_fn = load_run_instance_fn or load_run_instance
     wandb_dir = tempfile.mkdtemp()  # prevent wandb from polluting the home directory
     atexit.register(shutil.rmtree, wandb_dir, ignore_errors=True)  # clean up after wandb atexit handler finishes
     import wandb
-    logging.debug(f" run_cls: {run_cls}")
-    config = partial_to_dict(run_cls)
-    config['environ'] = log_environment_variables()
-    # config['git'] = git_info()  # TODO: check this for bugs
-    resume = checkpoint_path and exists(checkpoint_path)
+
+    logging.debug(f"run_cls: {run_cls}")
+    config = _extract_wandb_config(run_cls)
+    resume = bool(checkpoint_path and Path(checkpoint_path).exists())
     wandb_initialized = False
     err_cpt = 0
     while not wandb_initialized:
@@ -323,13 +369,16 @@ def run_with_wandb(entity, project, run_id, interface, run_cls, checkpoint_path:
             err_cpt += 1
             logging.warning(f"wandb error {err_cpt}: {e}")
             if err_cpt > 10:
-                logging.warning(f"Could not connect to wandb, aborting.")
-                exit()
-            else:
-                time.sleep(10.0)
-    # logging.info(config)
-    for stats in iterate_epochs(run_cls, interface, checkpoint_path, dump_run_instance_fn, load_run_instance_fn, 1, updater_fn):
-        [wandb.log(json.loads(s.to_json())) for s in stats]
+                logging.warning("Could not connect to wandb, aborting.")
+                raise RuntimeError(f"Could not connect to wandb after {err_cpt} attempts.") from e
+            time.sleep(10.0)
+    try:
+        for stats in iterate_epochs(run_cls, interface, checkpoint_path, dump_run_instance_fn, load_run_instance_fn, 1, updater_fn):
+            if stats:
+                for s in stats:
+                    wandb.log(json.loads(s.to_json()))
+    finally:
+        wandb.finish()
 
 
 def run(interface, run_cls, checkpoint_path: str = None, dump_run_instance_fn=None, load_run_instance_fn=None, updater_fn=None):
@@ -338,7 +387,7 @@ def run(interface, run_cls, checkpoint_path: str = None, dump_run_instance_fn=No
     """
     dump_run_instance_fn = dump_run_instance_fn or dump_run_instance
     load_run_instance_fn = load_run_instance_fn or load_run_instance
-    for stats in iterate_epochs(run_cls, interface, checkpoint_path, dump_run_instance_fn, load_run_instance_fn, 1, updater_fn):
+    for _ in iterate_epochs(run_cls, interface, checkpoint_path, dump_run_instance_fn, load_run_instance_fn, 1, updater_fn):
         pass
 
 
@@ -362,9 +411,9 @@ class Trainer:
                  hostname=cfg.HOSTNAME,
                  model_path=cfg.MODEL_PATH_TRAINER,
                  checkpoint_path=cfg.CHECKPOINT_PATH,
-                 dump_run_instance_fn: callable = None,
-                 load_run_instance_fn: callable = None,
-                 updater_fn: callable = None,
+                 dump_run_instance_fn: Callable = None,
+                 load_run_instance_fn: Callable = None,
+                 updater_fn: Callable = None,
                  groups: str | tuple[str] = "trainers",
                  target_groups: str | tuple[str] = "workers"):
         """
@@ -442,7 +491,7 @@ class Trainer:
             run_id (str): name of the run
             key (str): wandb API key
         """
-        if key is not None:
+        if key:
             os.environ['WANDB_API_KEY'] = key
         run_with_wandb(entity=entity,
                        project=project,
@@ -455,7 +504,7 @@ class Trainer:
                        updater_fn=self.updater_fn)
 
 
-# ROLLOUT WORKER: ===================================
+# === Rollout Worker ==================================================================================================
 
 
 class RolloutWorker:
@@ -469,11 +518,11 @@ class RolloutWorker:
             self,
             env_cls,
             actor_module_cls,
-            sample_compressor: callable = None,
+            sample_compressor: Callable = None,
             device="cpu",
             max_samples_per_episode=np.inf,
             model_path=cfg.MODEL_PATH_WORKER,
-            obs_preprocessor: callable = None,
+            obs_preprocessor: Callable = None,
             crc_debug=False,
             model_path_history=cfg.MODEL_PATH_SAVE_HISTORY,
             model_history=cfg.MODEL_HISTORY,
@@ -492,8 +541,8 @@ class RolloutWorker:
     ):
         """
         Args:
-            env_cls (type): class of the Gymnasium environment (subclass of tmrl.envs.GenericGymEnv)
-            actor_module_cls (type): class of the module containing the policy (subclass of tmrl.actor.ActorModule)
+            env_cls (type): class of the Gymnasium environment (subclass of tmrl.core.envs.GenericGymEnv)
+            actor_module_cls (type): class of the module containing the policy (subclass of tmrl.core.actor.ActorModule)
             sample_compressor (callable): compressor for sending samples over the Internet; \
                 when not `None`, `sample_compressor` must be a function that takes the following arguments: \
                 (prev_act, obs, rew, terminated, truncated, info), and that returns them (modified) in the same order: \
@@ -507,7 +556,7 @@ class RolloutWorker:
             crc_debug (bool): useful for debugging custom pipelines; leave to False otherwise
             model_path_history (str): (include the filename but omit .tmod) path to the saved history of policies; \
                 we recommend you leave this to the default
-            model_history (int): policies are saved every `model_history` new policies (0: not saved)
+            model_history (int): policies are saved every `model_history` new policies (<= 0: not saved)
             standalone (bool): if True, the worker will not try to connect to a server
             server_ip (str): ip of the central server
             server_port (int): public port of the central server
@@ -544,7 +593,6 @@ class RolloutWorker:
         self.crc_debug = crc_debug
         self.model_history = model_history
         self._cur_hist_cpt = 0
-        self.model_cpt = 0
 
         self.debug_ts_cpt = 0
         self.debug_ts_res_cpt = 0
@@ -568,6 +616,10 @@ class RolloutWorker:
         else:
             self.__endpoint = None
 
+    def _require_endpoint(self, method_name: str):
+        if self.__endpoint is None:
+            raise RuntimeError(f"{method_name} cannot be called in standalone mode.")
+
     def stop(self):
         """
         Stops the tlspyo Endpoint.
@@ -586,10 +638,19 @@ class RolloutWorker:
         Returns:
             numpy.array: action computed by the `ActorModule`
         """
-        # if self.obs_preprocessor is not None:
-        #     obs = self.obs_preprocessor(obs)
-        action = self.actor.act_(obs, test=test)
-        return action
+        return self.actor.act_(obs, test=test)
+
+    def _buffer_sample(self, prev_obs, act, new_obs, rew, terminated, truncated, info, is_reset=False):
+        if self.crc_debug:
+            self.debug_ts_cpt += 1
+            self.debug_ts_res_cpt = 0 if is_reset else self.debug_ts_res_cpt + 1
+            info['crc_sample'] = (prev_obs, act, new_obs, rew, terminated, truncated)
+            info['crc_sample_ts'] = (self.debug_ts_cpt, self.debug_ts_res_cpt)
+        if self.get_local_buffer_sample:
+            sample = self.get_local_buffer_sample(act, new_obs, rew, terminated, truncated, info)
+        else:
+            sample = act, new_obs, rew, terminated, truncated, info
+        self.buffer.append_sample(sample)
 
     def reset(self, collect_samples):
         """
@@ -603,29 +664,17 @@ class RolloutWorker:
             (nested structure: observation retrieved from the environment,
             dict: information retrieved from the environment)
         """
-        obs = None
         try:
             # Faster than hasattr() in real-time environments
-            act = self.env.unwrapped.default_action  # .astype(np.float32)
+            act = self.env.unwrapped.default_action
         except AttributeError:
             # In non-real-time environments, we sample a dummy action for the buffer at reset
             act = self.env.action_space.sample()
         new_obs, info = self.env.reset()
         if self.obs_preprocessor is not None:
             new_obs = self.obs_preprocessor(new_obs)
-        rew = 0.0
-        terminated, truncated = False, False
         if collect_samples:
-            if self.crc_debug:
-                self.debug_ts_cpt += 1
-                self.debug_ts_res_cpt = 0
-                info['crc_sample'] = (obs, act, new_obs, rew, terminated, truncated)
-                info['crc_sample_ts'] = (self.debug_ts_cpt, self.debug_ts_res_cpt)
-            if self.get_local_buffer_sample:
-                sample = self.get_local_buffer_sample(act, new_obs, rew, terminated, truncated, info)
-            else:
-                sample = act, new_obs, rew, terminated, truncated, info
-            self.buffer.append_sample(sample)
+            self._buffer_sample(None, act, new_obs, 0.0, False, False, info, is_reset=True)
         return new_obs, info
 
     def step(self, obs, test, collect_samples, last_step=False):
@@ -634,7 +683,7 @@ class RolloutWorker:
 
         A full RL transition is `obs` -> `act` -> `new_obs`, `rew`, `terminated`, `truncated`, `info`.
         Note that, in the Real-Time RL setting, `act` is appended to a buffer which is part of `new_obs`.
-        This is because is does not directly affect the new observation, due to real-time delays.
+        This is because it does not directly affect the new observation, due to real-time delays.
 
         Args:
             obs (nested structure): previous observation
@@ -657,16 +706,8 @@ class RolloutWorker:
         if collect_samples:
             if last_step and not terminated:
                 truncated = True
-            if self.crc_debug:
-                self.debug_ts_cpt += 1
-                self.debug_ts_res_cpt += 1
-                info['crc_sample'] = (obs, act, new_obs, rew, terminated, truncated)
-                info['crc_sample_ts'] = (self.debug_ts_cpt, self.debug_ts_res_cpt)
-            if self.get_local_buffer_sample:
-                sample = self.get_local_buffer_sample(act, new_obs, rew, terminated, truncated, info)
-            else:
-                sample = act, new_obs, rew, terminated, truncated, info
-            self.buffer.append_sample(sample)  # CAUTION: in the buffer, act is for the PREVIOUS transition (act, obs(act))
+            # CAUTION: in the buffer, act is for the PREVIOUS transition (act, obs(act))
+            self._buffer_sample(obs, act, new_obs, rew, terminated, truncated, info, is_reset=False)
         return new_obs, rew, terminated, truncated, info
 
     def collect_train_episode(self, max_samples=None):
@@ -748,7 +789,7 @@ class RolloutWorker:
         This method sends episodes continuously to the Server, and checks for new weights between episodes.
         For synchronous or more fine-grained sampling, use synchronous or lower-level APIs.
         For deployment, use `run_episodes` rather than `run`.
-        
+
         Note:
             This method does not work in standalone mode.
 
@@ -759,49 +800,39 @@ class RolloutWorker:
             verbose (bool): whether to log INFO messages.
             expert (bool): experts send training samples without updating their model nor running test episodes.
         """
-
         if self.standalone:
             raise RuntimeError("In standalone mode, use the run_episodes() method.")
 
         iterator = range(nb_episodes) if nb_episodes != np.inf else itertools.count()
 
-        if expert:
-            if not verbose:
-                for _ in iterator:
-                    self.collect_train_episode(self.max_samples_per_episode)
-                    self.send_and_clear_buffer()
-                    self.ignore_actor_weights()
-            else:
-                for _ in iterator:
-                    print_with_timestamp("collecting expert episode")
-                    self.collect_train_episode(self.max_samples_per_episode)
-                    print_with_timestamp("copying buffer for sending")
-                    self.send_and_clear_buffer()
-                    self.ignore_actor_weights()
-        elif not verbose:
-            if not test_episode_interval:
-                for _ in iterator:
-                    self.collect_train_episode(self.max_samples_per_episode)
-                    self.send_and_clear_buffer()
-                    self.update_actor_weights(verbose=False)
-            else:
-                for episode in iterator:
-                    if episode % test_episode_interval == 0 and not self.crc_debug:
-                        self.run_episode(self.max_samples_per_episode, train=False)
-                    self.collect_train_episode(self.max_samples_per_episode)
-                    self.send_and_clear_buffer()
-                    self.update_actor_weights(verbose=False)
-        else:
-            for episode in iterator:
-                if test_episode_interval and episode % test_episode_interval == 0 and not self.crc_debug:
+        for episode in iterator:
+            if not expert and test_episode_interval and episode % test_episode_interval == 0 and not self.crc_debug:
+                if verbose:
                     print_with_timestamp("running test episode")
-                    self.run_episode(self.max_samples_per_episode, train=False)
-                print_with_timestamp("collecting train episode")
-                self.collect_train_episode(self.max_samples_per_episode)
+                self.run_episode(self.max_samples_per_episode, train=False)
+            if verbose:
+                print_with_timestamp("collecting expert episode" if expert else "collecting train episode")
+            self.collect_train_episode(self.max_samples_per_episode)
+            if verbose:
                 print_with_timestamp("copying buffer for sending")
+            self.send_and_clear_buffer()
+            if expert:
+                self.ignore_actor_weights()
+            else:
+                if verbose:
+                    print_with_timestamp("checking for new weights")
+                self.update_actor_weights(verbose=verbose)
+
+    def _wait_for_model_updates(self, iteration, i_model, max_steps_per_update, verbose):
+        ratio = (iteration + 1) / i_model
+        while ratio > max_steps_per_update:
+            if verbose:
+                logging.info(f"Ratio {ratio} > {max_steps_per_update}, checking updates")
+            if len(self.buffer) > 0:
                 self.send_and_clear_buffer()
-                print_with_timestamp("checking for new weights")
-                self.update_actor_weights(verbose=True)
+            i_model += self.update_actor_weights(verbose=verbose, blocking=True)
+            ratio = (iteration + 1) / i_model
+        return i_model
 
     def run_synchronous(self,
                         test_episode_interval=0,
@@ -817,7 +848,8 @@ class RolloutWorker:
         It also works for rtgym environments with `wait_on_done` enabled, just set `end_episodes` to `True`.
 
         Note:
-            This method does not collect test episodes. Periodically use `run_episode(train=False)` if you wish to.
+            This method does not collect test episodes when `end_episodes` is `False`.
+            Periodically use `run_episode(train=False)` if you wish to.
             This method does not work in standalone mode.
 
         Args:
@@ -828,60 +860,50 @@ class RolloutWorker:
             max_steps_per_update (float): maximum number of steps to collect per model received from the Server
                 (this can be a non-integer ratio).
             end_episodes (bool): when True, waits for episodes to end before sending samples and waiting for updates.
-                When False (default), pauses whenever the max_steps_per_update ratio is exceeded.
+                When False, pauses whenever the `max_steps_per_update` ratio is exceeded.
             verbose (bool): whether to log INFO messages.
         """
-
         if self.standalone:
             raise RuntimeError("In standalone mode, use the run_episodes() method.")
-        if self.initial_steps < 1:
+        if initial_steps < 1:
             raise RuntimeError("initial_steps must be >= 1.")
+        if max_steps_per_update <= 0:
+            raise RuntimeError("max_steps_per_update must be > 0.")
 
-        # collect initial samples
-
+        # Collect initial samples before synchronizing:
         if verbose:
             logging.info(f"Collecting {initial_steps} initial steps")
 
         iteration = 0
         done = False
+        steps = 0
+        ret = 0.0
         while iteration < initial_steps:
             steps = 0
             ret = 0.0
-            # reset
             obs, info = self.reset(collect_samples=True)
             done = False
             iteration += 1
-            # episode
             while not done and (end_episodes or iteration < initial_steps):
-                # step
-                obs, rew, terminated, truncated, info = self.step(obs=obs,
-                                                                  test=False,
-                                                                  collect_samples=True,
-                                                                  last_step=steps == self.max_samples_per_episode - 1)
+                obs, rew, terminated, truncated, info = self.step(
+                    obs=obs,
+                    test=False,
+                    collect_samples=True,
+                    last_step=steps == self.max_samples_per_episode - 1,
+                )
                 iteration += 1
                 steps += 1
                 ret += rew
                 done = terminated or truncated
-            # send the collected samples to the Server
             self.buffer.stat_train_return = ret
             self.buffer.stat_train_steps = steps
             if verbose:
-                logging.info(f"Sending buffer (initial steps)")
+                logging.info("Sending buffer (initial steps)")
             self.send_and_clear_buffer()
 
-        i_model = 1
+        i_model = self._wait_for_model_updates(iteration, 1, max_steps_per_update, verbose)
 
-        # wait for the first updated model if required here
-        ratio = (iteration + 1) / i_model
-        while ratio > max_steps_per_update:
-            if verbose:
-                logging.info(f"Ratio {ratio} > {max_steps_per_update}, sending buffer checking updates")
-            self.send_and_clear_buffer()
-            i_model += self.update_actor_weights(verbose=verbose, blocking=True)
-            ratio = (iteration + 1) / i_model
-
-        # collect further samples while synchronizing with the Trainer
-
+        # Collect further samples while synchronizing with the Trainer:
         iteration = 0
         episode = 0
         if done:
@@ -889,14 +911,11 @@ class RolloutWorker:
             ret = 0.0
 
         while iteration < nb_steps:
-
             if done:
-                # test episode
                 if test_episode_interval > 0 and episode % test_episode_interval == 0 and end_episodes:
                     if verbose:
                         print_with_timestamp("running test episode")
                     self.run_episode(self.max_samples_per_episode, train=False)
-                # reset
                 obs, info = self.reset(collect_samples=True)
                 done = False
                 iteration += 1
@@ -904,51 +923,42 @@ class RolloutWorker:
                 ret = 0.0
                 episode += 1
 
+            ratio = (iteration + 1) / i_model
             while not done and (end_episodes or ratio <= max_steps_per_update):
-
-                # step
-                obs, rew, terminated, truncated, info = self.step(obs=obs,
-                                                                  test=False,
-                                                                  collect_samples=True,
-                                                                  last_step=steps == self.max_samples_per_episode - 1)
+                obs, rew, terminated, truncated, info = self.step(
+                    obs=obs,
+                    test=False,
+                    collect_samples=True,
+                    last_step=steps == self.max_samples_per_episode - 1,
+                )
                 iteration += 1
                 steps += 1
                 ret += rew
-
                 done = terminated or truncated
 
                 if not end_episodes:
-                    # check model and send samples after each step
                     ratio = (iteration + 1) / i_model
-                    while ratio > max_steps_per_update:
-                        if verbose:
-                            logging.info(f"Ratio {ratio} > {max_steps_per_update}, sending buffer checking updates (no eoe)")
-                        if not done:
-                            if verbose:
-                                logging.info(f"Sending buffer (no eoe)")
-                            self.send_and_clear_buffer()
-                        i_model += self.update_actor_weights(verbose=verbose, blocking=True)
+                    if ratio > max_steps_per_update:
+                        if done:
+                            self.buffer.stat_train_return = ret
+                            self.buffer.stat_train_steps = steps
+                        i_model = self._wait_for_model_updates(iteration, i_model, max_steps_per_update, verbose)
                         ratio = (iteration + 1) / i_model
 
             if end_episodes:
-                # check model and send samples only after episodes end
-                ratio = (iteration + 1) / i_model
-                while ratio > max_steps_per_update:
-                    if verbose:
-                        logging.info(
-                            f"Ratio {ratio} > {max_steps_per_update}, sending buffer checking updates (eoe)")
-                    if not done:
-                        if verbose:
-                            logging.info(f"Sending buffer (eoe)")
-                        self.send_and_clear_buffer()
-                    i_model += self.update_actor_weights(verbose=verbose, blocking=True)
-                    ratio = (iteration + 1) / i_model
+                self.buffer.stat_train_return = ret
+                self.buffer.stat_train_steps = steps
+                i_model = self._wait_for_model_updates(iteration, i_model, max_steps_per_update, verbose)
+            elif done:
+                self.buffer.stat_train_return = ret
+                self.buffer.stat_train_steps = steps
 
-            self.buffer.stat_train_return = ret
-            self.buffer.stat_train_steps = steps
-            if verbose:
-                logging.info(f"Sending buffer - DEBUG ratio {ratio} iteration {iteration} i_model {i_model}")
-            self.send_and_clear_buffer()
+            if len(self.buffer) > 0:
+                if verbose:
+                    logging.info(
+                        f"Sending buffer - DEBUG ratio {(iteration + 1) / i_model} iteration {iteration} i_model {i_model}"
+                    )
+                self.send_and_clear_buffer()
 
     def run_env_benchmark(self, nb_steps, test=False, verbose=True):
         """
@@ -981,7 +991,11 @@ class RolloutWorker:
         """
         Sends the buffered samples to the `Server`.
         """
-        self.__endpoint.produce(self.buffer, self.target_groups)
+        self._require_endpoint("send_and_clear_buffer")
+        if isinstance(self.target_groups, str):
+            self.__endpoint.produce(self.buffer, self.target_groups)
+        else:
+            self.__endpoint.send_object(self.buffer, {g: 1 for g in self.target_groups})
         self.buffer.clear()
 
     def update_actor_weights(self, verbose=True, blocking=False):
@@ -995,17 +1009,22 @@ class RolloutWorker:
         Returns:
             int: number of new actor models received from the Server (the latest is used).
         """
+        self._require_endpoint("update_actor_weights")
         weights_list = self.__endpoint.receive_all(blocking=blocking)
         nb_received = len(weights_list)
         if nb_received > 0:
             weights = weights_list[-1]
-            with open(self.model_path, 'wb') as f:
+            model_path = Path(self.model_path)
+            model_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(model_path, 'wb') as f:
                 f.write(weights)
-            if self.model_history:
+            if self.model_history and self.model_history > 0:
                 self._cur_hist_cpt += 1
                 if self._cur_hist_cpt == self.model_history:
                     x = datetime.datetime.now()
-                    with open(self.model_path_history + str(x.strftime("%d_%m_%Y_%H_%M_%S")) + ".tmod", 'wb') as f:
+                    hist_path = Path(f"{self.model_path_history}{x.strftime('%d_%m_%Y_%H_%M_%S')}.tmod")
+                    hist_path.parent.mkdir(parents=True, exist_ok=True)
+                    with open(hist_path, 'wb') as f:
                         f.write(weights)
                     self._cur_hist_cpt = 0
                     if verbose:
@@ -1024,6 +1043,7 @@ class RolloutWorker:
         Returns:
             int: number of new (ignored) actor models received from the Server.
         """
+        self._require_endpoint("ignore_actor_weights")
         weights_list = self.__endpoint.receive_all(blocking=False)
         nb_received = len(weights_list)
         return nb_received

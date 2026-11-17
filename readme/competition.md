@@ -6,7 +6,7 @@ The `tmrl` competition is a fun way of benchmarking vision-based autonomous car 
 
 Competitors solve Real-Time Gym environments featuring snapshots from the real `TrackMania 2020` video game, with no insider access, to test their self-racing policies.
 
-Regardless of whether you want to participate, you will also find that the [competition tutorial script](https://github.com/trackmania-rl/tmrl/blob/master/tmrl/tuto/competition/custom_actor_module.py) is a must if you wish to design your own advanced training pipeline in TrackMania :wink:
+Regardless of whether you want to participate, you will also find that the [competition tutorial script](https://github.com/trackmania-rl/tmrl/blob/master/tutorial/competition/custom_actor_module.py) is a must if you wish to design your own advanced training pipeline in TrackMania :wink:
 
 
 ## Leaderboards:
@@ -23,8 +23,8 @@ they only have access to real-time camera images (screenshots) along with usual 
 
 |          Winners          |   Team   | Time - _mean (std)_ |                                  Description                                  |                                                                                                                                  Resources                                                                                                                                  |
 |:-------------------------:|:--------:|:-------------------:|:-----------------------------------------------------------------------------:|:---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------:|
-|      :dragon: :one:       | Baseline |        ? (?)        | SAC, CNN, Full environment, camera 1 (canada skin), grayscale, `tmrl` default |                           [code](https://github.com/trackmania-rl/tmrl/blob/c61fc1ef48de0a68a0dc1a228ef6f4b8554c5798/tmrl/custom/custom_models.py#L537), [weights](https://github.com/trackmania-rl/tmrl/releases/download/v0.4.0/resources.zip)                            |
-|     :racehorse: :two:     | Baseline |   47.176 (0.769)    |                  SAC, MLP, LIDAR environment, `tmrl` default                  | [code](https://github.com/trackmania-rl/tmrl/blob/c61fc1ef48de0a68a0dc1a228ef6f4b8554c5798/tmrl/custom/custom_models.py#L54), [weights](https://github.com/trackmania-rl/tmrl/releases/download/v0.4.0/resources.zip), [video](https://www.youtube.com/watch?v=LN29DDlHp1U) |
+|      :dragon: :one:       | Baseline |        ? (?)        | SAC, CNN, Full environment, camera 1 (canada skin), grayscale, `tmrl` default |                           [code](https://github.com/trackmania-rl/tmrl/blob/c61fc1ef48de0a68a0dc1a228ef6f4b8554c5798/tmrl/custom/torch/custom_models.py#L537), [weights](https://github.com/trackmania-rl/tmrl/releases/download/v0.4.0/resources.zip)                            |
+|     :racehorse: :two:     | Baseline |   47.176 (0.769)    |                  SAC, MLP, LIDAR environment, `tmrl` default                  | [code](https://github.com/trackmania-rl/tmrl/blob/c61fc1ef48de0a68a0dc1a228ef6f4b8554c5798/tmrl/custom/torch/custom_models.py#L54), [weights](https://github.com/trackmania-rl/tmrl/releases/download/v0.4.0/resources.zip), [video](https://www.youtube.com/watch?v=LN29DDlHp1U) |
 |     :leopard: :three:     |
 |      :tiger2: :four:      |
 |       :cat2: :five:       |
@@ -75,10 +75,10 @@ In this iteration, competitors race on the `tmrl-test` track (plain road) by sol
 - The `observation space` is a history of 4 raw snapshots along with the speed, gear, rpm and 2 previous actions. The choice of camera is up to you as long as you use one of the default. You are allowed to use colors if you wish (set the `"IMG_GRAYSCALE"` entry to `false` in `config.json`). You may also customize the actual image dimensions (`"IMG_WIDTH"` and `"IMG_HEIGHT"`), and the game window dimensions (`"WINDOW_WIDTH"` and `"WINDOW_HEIGHT"`) if you need to. However, the window dimensions must remain between `(256, 128)` and `(958, 488)` (dimensions greater than `(958, 488)` are **not** allowed).
 - The `control frequency` is 20 Hz.
 
-An entry to the competition simply needs to be a working implementation of the [ActorModule](https://github.com/trackmania-rl/tmrl/blob/master/tmrl/actor.py) interface.
+An entry to the competition simply needs to be a working implementation of the [ActorModule](https://github.com/trackmania-rl/tmrl/blob/master/tmrl/core/actor.py) interface.
 How to implement this module is entirely up to you, it does not have to be a neural network, nor to be trained though RL.
 
-Nevertheless, we encourage deep RL approaches, and provide a fast-track [tutorial](https://github.com/trackmania-rl/tmrl/blob/master/tmrl/tuto/competition/custom_actor_module.py) in this direction for your convenience.
+Nevertheless, we encourage deep RL approaches, and provide a fast-track [tutorial](https://github.com/trackmania-rl/tmrl/blob/master/tutorial/competition/custom_actor_module.py) in this direction for your convenience.
 
 :loudspeaker: **Hardware constraint**: your `ActorModule` needs to be lightweight enough to run at 20Hz on a Windows 11 machine with `i7-12700H` CPU and `RTX3080-Ti (laptop)` GPU in parallel to `TrackMania 2020`, as this is what we will be using to evaluate your submission.
 
@@ -97,15 +97,15 @@ If you wish to get creative and solve a problem that doesn't fit in the current 
 Use the [discussions](https://github.com/trackmania-rl/tmrl/discussions) section to propose your project.)_
 
 
-We evaluate your submission using our [evaluation script](https://github.com/trackmania-rl/tmrl/blob/master/tmrl/tuto/competition/competition_eval.py).
+We evaluate your submission using our [evaluation script](https://github.com/trackmania-rl/tmrl/blob/master/tutorial/competition/competition_eval.py).
 The `"SLEEP_TIME_AT_RESET"` entry in `config.json` (`C:\Users\YourUsername\TmrlData\config`) is set to 0.0 to avoid wasting time at the beginning of the episode (but we recommend leaving this to the default 1.5 for training).
 
 ## Tutorials:
-The [competition tutorial script](https://github.com/trackmania-rl/tmrl/blob/master/tmrl/tuto/competition/custom_actor_module.py) will help you quickly set up a custom RL training pipeline for the `Full` TrackMania Gymnasium environment.
+The [competition tutorial script](https://github.com/trackmania-rl/tmrl/blob/master/tutorial/competition/custom_actor_module.py) will help you quickly set up a custom RL training pipeline for the `Full` TrackMania Gymnasium environment.
 
 ## Submit an entry:
 An entry to the competition comprises:
-- a python script providing a working implementation of the [ActorModule](https://github.com/trackmania-rl/tmrl/blob/master/tmrl/actor.py) interface,
+- a python script providing a working implementation of the [ActorModule](https://github.com/trackmania-rl/tmrl/blob/master/tmrl/core/actor.py) interface,
 - the `config.json` file you used for the environment config (please remove all personal information),
 - optional **human-readable** data files (typically a `json` file).
 - a name for your team, and all the supporting information you wish to provide (description, video, repo...)
@@ -115,7 +115,7 @@ Please create a dedicated discussion in the [discussions](https://github.com/tra
 :warning: Importantly, note that, for everyone's safety, **we do not accept derivatives of pickle data files** (which is typically what you get when using the serializers provided by deep learning frameworks).
 Instead, we do accept `json` files.
 In practice, this means you probably need to code your own deserializer as part of your `ActorModule.load` implementation.
-See the [competition tutorial script](https://github.com/trackmania-rl/tmrl/blob/master/tmrl/tuto/competition/custom_actor_module.py) for an example of how to do so with PyTorch.
+See the [competition tutorial script](https://github.com/trackmania-rl/tmrl/blob/master/tutorial/competition/custom_actor_module.py) for an example of how to do so with PyTorch.
 
 ## Questions, suggestions:
 Questions and suggestions to improve the competition are welcome!

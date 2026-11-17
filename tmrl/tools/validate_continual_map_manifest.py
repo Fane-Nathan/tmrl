@@ -31,8 +31,12 @@ def canonical_sha256(payload: dict[str, Any]) -> str:
 
 
 def validate_manifest(payload: dict[str, Any], require_frozen: bool = False) -> list[str]:
+    """Validate map-manifest schema, split coverage, and SHA-256 digests."""
+    if not isinstance(payload, dict):
+        return ["manifest root must be a JSON object"]
     errors = []
-    if payload.get("schema_version") != 1:
+    schema_version = payload.get("schema_version")
+    if isinstance(schema_version, bool) or schema_version != 1:
         errors.append("schema_version must equal 1")
     if require_frozen and payload.get("frozen") is not True:
         errors.append("manifest must set frozen=true")
@@ -77,13 +81,22 @@ def validate_manifest(payload: dict[str, Any], require_frozen: bool = False) -> 
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Parse CLI arguments, validate the map manifest, and print JSON."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("manifest", type=Path)
-    parser.add_argument("--require-frozen", action="store_true")
+    parser.add_argument(
+        "manifest",
+        type=Path,
+        help="Path to the continual map manifest JSON file.",
+    )
+    parser.add_argument(
+        "--require-frozen",
+        action="store_true",
+        help="Fail validation unless the manifest sets frozen=true.",
+    )
     args = parser.parse_args(argv)
     try:
         payload = json.loads(args.manifest.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         print(f"Manifest read failed: {exc}", file=sys.stderr)
         return 2
     errors = validate_manifest(payload, require_frozen=args.require_frozen)
